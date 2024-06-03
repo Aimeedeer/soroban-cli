@@ -22,6 +22,7 @@ pub mod signer;
 pub mod toid;
 pub mod utils;
 pub mod wasm;
+pub mod repro_utils;
 
 pub use commands::Root;
 

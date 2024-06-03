@@ -1,9 +1,12 @@
+use crate::wasm;
 use clap::{arg, command, Parser};
 use std::fmt::Debug;
+use std::str::FromStr;
+use std::{fs, io};
+use stellar_xdr::curr::{ScMetaEntry, ScMetaV0, StringM};
 #[cfg(feature = "opt")]
 use wasm_opt::{Feature, OptimizationError, OptimizationOptions};
-
-use crate::wasm;
+use crate::repro_utils;
 
 #[derive(Parser, Debug, Clone)]
 #[group(skip)]
@@ -25,6 +28,12 @@ pub enum Error {
     #[cfg(not(feature = "opt"))]
     #[error("Must install with \"opt\" feature, e.g. `cargo install --locked soroban-cli --features opt")]
     Install,
+    #[error("writing wasm file: {0}")]
+    WritingFile(io::Error),
+    #[error("copying wasm file: {0}")]
+    CopyingFile(io::Error),
+    #[error(transparent)]
+    Repro(#[from] repro_utils::Error),
 }
 
 impl Cmd {
@@ -35,6 +44,11 @@ impl Cmd {
 
     #[cfg(feature = "opt")]
     pub fn run(&self) -> Result<(), Error> {
+        if self.is_already_optimized()? {
+            println!("The file is already optimized.");
+            return Ok(());
+        }
+
         let wasm_size = self.wasm.len()?;
 
         println!(
@@ -67,6 +81,7 @@ impl Cmd {
             .run(&self.wasm.wasm, &wasm_out)
             .map_err(Error::OptimizationError)?;
 
+        self.update_metadata(&wasm_out)?;
         let wasm_out_size = wasm::len(&wasm_out)?;
         println!(
             "Optimized: {} ({} bytes)",
@@ -75,5 +90,42 @@ impl Cmd {
         );
 
         Ok(())
+    }
+
+    fn update_metadata(&self, wasm_out: &std::path::PathBuf) -> Result<(), Error> {
+        let meta_entry = ScMetaEntry::ScMetaV0(ScMetaV0 {
+            key: StringM::from_str("wasm_opt").expect("StringM"),
+            val: StringM::from_str("true").expect("StringM"),
+        });
+
+        let wasm_buf = repro_utils::update_customsection_metadata(&self.wasm.wasm, meta_entry)?;
+
+        let temp_file = format!(
+            "{}.{}.temp",
+            wasm_out.to_string_lossy(),
+            rand::random::<u32>()
+        );
+
+        fs::write(&temp_file, wasm_buf).map_err(Error::WritingFile)?;
+        fs::rename(&temp_file, wasm_out).map_err(Error::CopyingFile)?;
+
+        Ok(())
+    }
+
+    fn is_already_optimized(&self) -> Result<bool, Error> {
+        let metadata = repro_utils::read_wasm_contractmeta_file(&self.wasm.wasm)?;
+
+        let mut is_optimized = false;
+        metadata.iter().for_each(|ScMetaEntry::ScMetaV0(data)| {
+            match data.key.to_string().as_str() {
+                "wasm_opt" => match data.val.to_string().as_str() {
+                    "true" => is_optimized = true,
+                    _ => {}
+                },
+                _ => {}
+            }
+        });
+
+        Ok(is_optimized)
     }
 }
