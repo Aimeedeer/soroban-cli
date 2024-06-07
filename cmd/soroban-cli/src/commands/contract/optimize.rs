@@ -1,3 +1,4 @@
+use crate::repro_utils;
 use crate::wasm;
 use clap::{arg, command, Parser};
 use std::fmt::Debug;
@@ -6,7 +7,6 @@ use std::{fs, io};
 use stellar_xdr::curr::{ScMetaEntry, ScMetaV0, StringM};
 #[cfg(feature = "opt")]
 use wasm_opt::{Feature, OptimizationError, OptimizationOptions};
-use crate::repro_utils;
 
 #[derive(Parser, Debug, Clone)]
 #[group(skip)]

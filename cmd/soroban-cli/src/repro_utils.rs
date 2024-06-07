@@ -1,15 +1,15 @@
-use std::str::FromStr;
-use std::str;
+use cargo_metadata::Package;
 use soroban_env_host::xdr::{self, ReadXdr};
-use std::path::Path;
 use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Cursor};
+use std::path::Path;
+use std::process::Command;
+use std::str;
+use std::str::FromStr;
 use stellar_xdr::curr::{Limited, Limits, ScMetaEntry, ScMetaV0, StringM, WriteXdr};
 use wasm_encoder::{CustomSection, Section};
 use wasmparser::{Parser as WasmParser, Payload};
-use std::process::Command;
-use cargo_metadata::{Package};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -103,7 +103,10 @@ pub fn read_wasm_without_contractmeta_file(contract_path: &Path) -> Result<Vec<u
     read_wasm_without_contractmeta(&buf)
 }
 
-pub fn update_customsection_metadata(contract_path: &Path, meta_entry: ScMetaEntry) -> Result<Vec<u8>, Error> {
+pub fn update_customsection_metadata(
+    contract_path: &Path,
+    meta_entry: ScMetaEntry,
+) -> Result<Vec<u8>, Error> {
     let mut metadata = read_wasm_contractmeta_file(contract_path)?;
 
     metadata.push(meta_entry);
@@ -176,7 +179,7 @@ pub fn git_data(workspace_root: &str) -> Result<GitData, Error> {
         .map_err(Error::Utf8)?
         .trim()
         .to_string();
-    
+
     if url.starts_with("git@github.com:") {
         url = url.replace("git@github.com:", "https://github.com/");
     }
@@ -203,15 +206,18 @@ pub fn update_build_contractmeta_in_contract(
     p: &Package,
     git_data: &GitData,
 ) -> Result<(), Error> {
-    let index = target_dir.find(&git_data.project_name).unwrap_or(0);
-    let relative_target_dir = &target_dir[index..];
+    let mut v: Vec<&str> = target_dir.split(&git_data.project_name).collect();
+    v.reverse();
+    let relative_target_dir = v[0].trim_start_matches("/");
 
-    let index = workspace_root.find(&git_data.project_name).unwrap_or(0);
-    let relative_workspace_root = &workspace_root[index..];
+    let mut v: Vec<&str> = workspace_root.split(&git_data.project_name).collect();
+    v.reverse();
+    let relative_workspace_root = v[0].trim_start_matches("/");
 
     let manifest_path_str = p.manifest_path.as_str();
-    let index = manifest_path_str.find(&git_data.project_name).unwrap_or(0);
-    let relative_package_manifest_path = &manifest_path_str[index..];
+    let mut v: Vec<&str> = manifest_path_str.split(&git_data.project_name).collect();
+    v.reverse();
+    let relative_package_manifest_path = v[0].trim_start_matches("/");
 
     let file_path = Path::new(target_dir)
         .join("wasm32-unknown-unknown")

@@ -1,3 +1,4 @@
+use crate::repro_utils;
 use crate::wasm;
 use clap::Parser;
 use std::{
@@ -6,7 +7,6 @@ use std::{
     process::{Command, ExitStatus},
 };
 use stellar_xdr::curr::ScMetaEntry;
-use crate::repro_utils;
 
 const CONTRACT_REPRO_PATH: &str = "contract-repro";
 
@@ -72,26 +72,23 @@ impl Cmd {
             }
         }
 
-        let work_dir = repro_dir.join(&metadata.project_name);
+        std::fs::create_dir_all(&repro_dir).map_err(Error::CreatingDirectory)?;
+
+        let work_dir_name = format!("{}-{}", &metadata.project_name, self.wasm.hash()?);
+
+        let work_dir = repro_dir.join(work_dir_name);
         let git_dir = work_dir.join(&metadata.project_name);
-
-        let package_manifest_path = work_dir.join(&metadata.package_manifest_path);
-
-        std::fs::create_dir_all(&git_dir).map_err(Error::CreatingDirectory)?;
+        let package_manifest_path = git_dir.join(&metadata.package_manifest_path);
 
         let mut git_cmd = Command::new("git");
-        git_cmd.args([
-            "clone",
-            &metadata.git_url,
-            &git_dir.to_string_lossy(),
-        ]);
+        git_cmd.args(["clone", &metadata.git_url, &git_dir.to_string_lossy()]);
         git_cmd.status().map_err(Error::GitCmd)?;
 
         let mut git_cmd = Command::new("git");
         git_cmd.current_dir(&git_dir);
         git_cmd.args(["checkout", &metadata.commit_hash]);
         git_cmd.status().map_err(Error::GitCmd)?;
-        
+
         /*
         let mut git_cmd = Command::new("git");
         git_cmd.current_dir(&git_dir);
