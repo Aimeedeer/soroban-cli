@@ -4,6 +4,7 @@ use clap::Parser;
 use std::{
     fmt::Debug,
     fs, io,
+    path::PathBuf,
     process::{Command, ExitStatus},
 };
 use stellar_xdr::curr::ScMetaEntry;
@@ -36,6 +37,10 @@ pub enum Error {
     Utf8(std::str::Utf8Error),
     #[error(transparent)]
     Repro(#[from] repro_utils::Error),
+    #[error("Git url doesn't exist. Please provide corrolated source code path using `--repo <source_code_path>`")]
+    GitUrlNotFound,
+    #[error("Invalid git url. Please provide the corrolated source code using `--repo <source_code_path>`")]
+    InvalidGitUrl,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -43,6 +48,9 @@ pub struct Cmd {
     /// Contract wasm file
     #[command(flatten)]
     wasm: wasm::Args,
+    /// Path to the source code
+    #[arg(long)]
+    repo: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -77,12 +85,25 @@ impl Cmd {
         let work_dir_name = format!("{}-{}", &metadata.project_name, self.wasm.hash()?);
 
         let work_dir = repro_dir.join(work_dir_name);
-        let git_dir = work_dir.join(&metadata.project_name);
-        let package_manifest_path = git_dir.join(&metadata.package_manifest_path);
+        let mut git_dir = work_dir.join(&metadata.project_name);
 
-        let mut git_cmd = Command::new("git");
-        git_cmd.args(["clone", &metadata.git_url, &git_dir.to_string_lossy()]);
-        git_cmd.status().map_err(Error::GitCmd)?;
+        if let Some(repo_dir) = &self.repo {
+            git_dir = repo_dir.to_path_buf();
+        } else {
+            if metadata.git_url.is_empty() {
+                return Err(Error::GitUrlNotFound);
+            }
+
+            if !is_git_url_valid(&metadata.git_url) {
+                return Err(Error::InvalidGitUrl);
+            }
+
+            let mut git_cmd = Command::new("git");
+            git_cmd.args(["clone", &metadata.git_url, &git_dir.to_string_lossy()]);
+            git_cmd.status().map_err(Error::GitCmd)?;
+        }
+
+        let package_manifest_path = git_dir.join(&metadata.package_manifest_path);
 
         let mut git_cmd = Command::new("git");
         git_cmd.current_dir(&git_dir);
@@ -229,4 +250,29 @@ impl Cmd {
 
         Ok(contract_metadata)
     }
+}
+
+fn is_git_url_valid(git_url: &str) -> bool {
+    let mut git_cmd = Command::new("git");
+    git_cmd.args(["ls-remote", git_url]);
+    git_cmd.env("GIT_TERMINAL_PROMPT", "0");
+
+    let mut is_valid = false;
+
+    let output = git_cmd.output();
+    match output {
+        Ok(output) => {
+            if output.status.success() {
+                is_valid = true;
+            } else {
+                let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
+                println!("Failed to access the repository: {}", stderr);
+            }
+        }
+        Err(e) => {
+            println!("Failed to execute git command: {}", e);
+        }
+    }
+
+    is_valid
 }
