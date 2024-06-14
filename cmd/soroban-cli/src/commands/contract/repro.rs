@@ -4,7 +4,7 @@ use clap::Parser;
 use std::{
     fmt::Debug,
     fs, io,
-    path::PathBuf,
+    path::Path,
     process::{Command, ExitStatus},
 };
 use stellar_xdr::curr::ScMetaEntry;
@@ -50,7 +50,7 @@ pub struct Cmd {
     wasm: wasm::Args,
     /// Path to the source code
     #[arg(long)]
-    repo: Option<PathBuf>,
+    repo: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -88,7 +88,16 @@ impl Cmd {
         let mut git_dir = work_dir.join(&metadata.project_name);
 
         if let Some(repo_dir) = &self.repo {
-            git_dir = repo_dir.to_path_buf();
+            if !repo_dir.contains(&metadata.project_name) {
+                println!(
+                    "Can't find the project {} in path: {}. Please input the right repo path.",
+                    metadata.project_name, repo_dir
+                );
+                return Ok(());
+            }
+            if let Some(dir) = repo_dir.split(&metadata.project_name).next() {
+                git_dir = Path::new(&dir).join(&metadata.project_name);
+            }
         } else {
             if metadata.git_url.is_empty() {
                 return Err(Error::GitUrlNotFound);
