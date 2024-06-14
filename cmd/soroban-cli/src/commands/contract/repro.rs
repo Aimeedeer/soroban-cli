@@ -1,6 +1,7 @@
 use crate::repro_utils;
 use crate::wasm;
 use clap::Parser;
+use colored::*;
 use std::{
     fmt::Debug,
     fs, io,
@@ -213,7 +214,7 @@ impl Cmd {
         let new_buf = fs::read(new_wasm).map_err(Error::ReadingWasmFile)?;
 
         if pre_buf.len() != new_buf.len() {
-            println!("There are different!");
+            println!("{}", "They are different!".red().bold());
             return Ok(());
         }
 
@@ -223,9 +224,9 @@ impl Cmd {
             .filter(|(a, b)| a != b)
             .count();
         if num > 0 {
-            println!("They are different! num : {num}");
+            println!("{}", "They are different! num : {num}".red().bold());
         } else {
-            println!("They are the same!");
+            println!("{}", "They are the same!".green().bold());
         }
 
         Ok(())
