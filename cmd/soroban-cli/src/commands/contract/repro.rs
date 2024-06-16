@@ -224,7 +224,7 @@ impl Cmd {
             .filter(|(a, b)| a != b)
             .count();
         if num > 0 {
-            println!("{}", "They are different! num : {num}".red().bold());
+            println!("{}", format!("They are different! Size diff: {}", num).red().bold());
         } else {
             println!("{}", "They are the same!".green().bold());
         }
