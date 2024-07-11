@@ -86,6 +86,8 @@ pub enum Error {
     GettingCurrentDir(io::Error),
     #[error(transparent)]
     Repro(#[from] repro_utils::Error),
+    #[error("retreiving CARGO_HOME: {0}")]
+    CargoHome(io::Error),
 }
 
 impl Cmd {
@@ -141,6 +143,14 @@ impl Cmd {
                 if !activate.is_empty() {
                     cmd.arg(format!("--features={activate}"));
                 }
+            }
+            {
+                assert!(std::env::var("RUSTFLAGS") == Err(std::env::VarError::NotPresent));
+                let cargo_home = home::cargo_home().map_err(Error::CargoHome)?;
+                let cargo_home = format!("{}", cargo_home.display());
+                let registry_prefix = format!("{cargo_home}/registry/src/");
+                let rustflags = format!("--remap-path-prefix={registry_prefix}=");
+                cmd.env("RUSTFLAGS", rustflags);
             }
             let cmd_str = format!(
                 "cargo {}",
