@@ -213,8 +213,10 @@ impl Cmd {
         let pre_buf = self.wasm.read()?;
         let new_buf = fs::read(new_wasm).map_err(Error::ReadingWasmFile)?;
 
-        if pre_buf.len() != new_buf.len() {
-            println!("{}", "They are different!".red().bold());
+        let pre_buf_len = pre_buf.len();
+        let new_buf_len = new_buf.len();
+        if pre_buf_len != new_buf_len {
+            println!("{}", format!("They are different! Size diff: {}", pre_buf_len.abs_diff(new_buff_len)).red().bold());
             return Ok(());
         }
 
@@ -224,7 +226,7 @@ impl Cmd {
             .filter(|(a, b)| a != b)
             .count();
         if num > 0 {
-            println!("{}", format!("They are different! Size diff: {}", num).red().bold());
+            println!("{}", format!("They are different! Bytes diff: {}", num).red().bold());
         } else {
             println!("{}", "They are the same!".green().bold());
         }
