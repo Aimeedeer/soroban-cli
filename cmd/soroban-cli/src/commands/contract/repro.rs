@@ -220,7 +220,7 @@ impl Cmd {
                 "{}",
                 format!(
                     "They are different! Size diff: {}",
-                    pre_buf_len.abs_diff(new_buff_len)
+                    pre_buf_len.abs_diff(new_buf_len)
                 )
                 .red()
                 .bold()

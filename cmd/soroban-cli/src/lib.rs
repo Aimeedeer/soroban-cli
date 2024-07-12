@@ -17,12 +17,9 @@ pub mod fee;
 pub mod get_spec;
 pub mod key;
 pub mod log;
-<<<<<<< HEAD
 pub mod print;
-pub mod signer;
-=======
 pub mod repro_utils;
->>>>>>> de2de42 (relative path)
+pub mod signer;
 pub mod toid;
 pub mod utils;
 pub mod wasm;
