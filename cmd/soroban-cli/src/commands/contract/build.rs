@@ -112,7 +112,7 @@ impl Cmd {
         }
 
         for p in packages {
-            let mut cmd = Command::new("cargo");
+            let mut cmd = Command::new("../cargo/target/debug/cargo");
             cmd.stdout(Stdio::piped());
 
             cmd.arg("rustc");
@@ -152,6 +152,7 @@ impl Cmd {
                 let rustflags = format!("--remap-path-prefix={registry_prefix}=");
                 cmd.env("RUSTFLAGS", rustflags);
             }
+
             let cmd_str = format!(
                 "cargo {}",
                 cmd.get_args().map(OsStr::to_string_lossy).join(" ")
