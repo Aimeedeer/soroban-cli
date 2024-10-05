@@ -3802,6 +3802,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc_version_runtime"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2dd18cd2bae1820af0b6ad5e54f4a51d0f3fcc53b05f845675074efcc7af071d"
+dependencies = [
+ "rustc_version",
+ "semver",
+]
+
+[[package]]
 name = "rustix"
 version = "0.37.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4455,6 +4465,7 @@ dependencies = [
  "clap",
  "clap-markdown",
  "clap_complete",
+ "colored",
  "crate-git-revision 0.0.4",
  "csv",
  "directories",
@@ -4474,6 +4485,7 @@ dependencies = [
  "itertools 0.10.5",
  "jsonrpsee-core",
  "jsonrpsee-http-client",
+ "leb128",
  "mockito",
  "num-bigint",
  "open",
@@ -4485,6 +4497,7 @@ dependencies = [
  "reqwest 0.12.7",
  "rpassword",
  "rust-embed",
+ "rustc_version_runtime",
  "semver",
  "sep5",
  "serde",
@@ -4519,6 +4532,7 @@ dependencies = [
  "ulid",
  "url",
  "walkdir",
+ "wasm-encoder",
  "wasm-gen",
  "wasm-opt",
  "wasmparser 0.90.0",
@@ -6026,6 +6040,15 @@ name = "wasm-bindgen-shared"
 version = "0.2.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af190c94f2773fdb3729c55b007a722abb5384da03bc0986df4c289bf5567e96"
+
+[[package]]
+name = "wasm-encoder"
+version = "0.202.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfd106365a7f5f7aa3c1916a98cbb3ad477f5ff96ddb130285a91c6e7429e67a"
+dependencies = [
+ "leb128",
+]
 
 [[package]]
 name = "wasm-gen"

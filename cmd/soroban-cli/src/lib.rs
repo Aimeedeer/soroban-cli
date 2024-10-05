@@ -19,6 +19,7 @@ pub mod get_spec;
 pub mod key;
 pub mod log;
 pub mod print;
+pub mod repro_utils;
 pub mod signer;
 pub mod toid;
 pub mod tx;

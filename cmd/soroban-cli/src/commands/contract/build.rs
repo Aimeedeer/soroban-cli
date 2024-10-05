@@ -12,6 +12,8 @@ use std::{
 };
 use stellar_xdr::curr::{Limits, ScMetaEntry, ScMetaV0, StringM, WriteXdr};
 
+use crate::repro_utils;
+
 /// Build a contract from source
 ///
 /// Builds all crates that are referenced by the cargo manifest (Cargo.toml)
@@ -104,6 +106,8 @@ pub enum Error {
     MetaArg(String),
     #[error("retreiving CARGO_HOME: {0}")]
     CargoHome(io::Error),
+    #[error(transparent)]
+    Repro(#[from] repro_utils::Error),
 }
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
@@ -114,8 +118,13 @@ impl Cmd {
         let working_dir = env::current_dir().map_err(Error::GettingCurrentDir)?;
 
         let metadata = self.metadata()?;
+
         let packages = self.packages(&metadata)?;
+        let workspace_root = &metadata.workspace_root;
+
         let target_dir = &metadata.target_directory;
+
+        let git_data = repro_utils::git_data(&metadata.workspace_root.as_str())?;
 
         if let Some(package) = &self.package {
             if packages.is_empty() {
@@ -126,9 +135,11 @@ impl Cmd {
         }
 
         for p in packages {
-            let mut cmd = Command::new("cargo");
+            let mut cmd = Command::new("../cargo/target/debug/cargo");
             cmd.stdout(Stdio::piped());
+
             cmd.arg("rustc");
+            cmd.arg("--locked");
             let manifest_path = pathdiff::diff_paths(&p.manifest_path, &working_dir)
                 .unwrap_or(p.manifest_path.clone().into());
             cmd.arg(format!(
@@ -156,7 +167,18 @@ impl Cmd {
                     cmd.arg(format!("--features={activate}"));
                 }
             }
+
             set_env_to_remap_absolute_paths(&mut cmd)?;
+
+            {
+                assert!(std::env::var("RUSTFLAGS") == Err(std::env::VarError::NotPresent));
+                let cargo_home = home::cargo_home().map_err(Error::CargoHome)?;
+                let cargo_home = format!("{}", cargo_home.display());
+                let registry_prefix = format!("{cargo_home}/registry/src/");
+                let rustflags = format!("--remap-path-prefix={registry_prefix}=");
+                cmd.env("RUSTFLAGS", rustflags);
+            }
+
             let cmd_str = format!(
                 "cargo {}",
                 cmd.get_args().map(OsStr::to_string_lossy).join(" ")
@@ -169,6 +191,14 @@ impl Cmd {
                 let status = cmd.status().map_err(Error::CargoCmd)?;
                 if !status.success() {
                     return Err(Error::Exit(status));
+                } else {
+                    repro_utils::update_build_contractmeta_in_contract(
+                        &self.profile,
+                        target_dir.as_str(),
+                        workspace_root.as_str(),
+                        &p,
+                        &git_data,
+                    )?;
                 }
 
                 let file = format!("{}.wasm", p.name.replace('-', "_"));
