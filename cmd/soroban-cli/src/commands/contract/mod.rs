@@ -14,6 +14,7 @@ pub mod install;
 pub mod invoke;
 pub mod optimize;
 pub mod read;
+pub mod repro;
 pub mod restore;
 
 use crate::commands::global;
@@ -84,6 +85,9 @@ pub enum Cmd {
     /// Print the current value of a contract-data ledger entry
     Read(read::Cmd),
 
+    /// Reproduce the contract build
+    Repro(repro::Cmd),
+
     /// Restore an evicted value for a contract-data legder entry.
     ///
     /// If no keys are specificed the contract itself is restored.
@@ -138,6 +142,9 @@ pub enum Error {
     Read(#[from] read::Error),
 
     #[error(transparent)]
+    Repro(#[from] repro::Error),
+
+    #[error(transparent)]
     Restore(#[from] restore::Error),
 }
 
@@ -159,6 +166,7 @@ impl Cmd {
             Cmd::Optimize(optimize) => optimize.run()?,
             Cmd::Fetch(fetch) => fetch.run().await?,
             Cmd::Read(read) => read.run().await?,
+            Cmd::Repro(repro) => repro.run().await?,
             Cmd::Restore(restore) => restore.run().await?,
         }
         Ok(())
