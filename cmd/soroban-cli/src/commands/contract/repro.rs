@@ -7,8 +7,11 @@ use crate::{
 };
 use clap::{Parser, Subcommand};
 use colored::*;
-use crate::xdr::{Hash, ScMetaEntry};
+use crate::xdr::Hash;
+use itertools::Itertools;
+use regex::Regex;
 use std::{
+    ffi::OsStr,
     fmt::Debug,
     fs, io,
     path::{Path, PathBuf},
@@ -25,15 +28,17 @@ pub enum Error {
     RustupCmd(io::Error),
     #[error(transparent)]
     GitCmd(io::Error),
+    #[error("Exited with status code: {code}")]
+    GitCmdStatus { code: i32 },
+    #[error("Process terminated by signal: {git_cmd}.")]
+    GitCmdTerminated { git_cmd: String },
     #[error(transparent)]
     CreatingDirectory(io::Error),
-    #[error("Exit status {0}")]
+    #[error("Exit status {0}.")]
     Exit(ExitStatus),
-    #[error("Package {package} not found")]
-    PackageNotFound { package: String },
-    #[error("Reading WASM file: {0}")]
+    #[error("Reading WASM file: {0}.")]
     ReadingWasmFile(io::Error),
-    #[error("Writing WASM file: {0}")]
+    #[error("Writing WASM file: {0}.")]
     WritingWasmFile(io::Error),
     #[error(transparent)]
     Wasm(#[from] wasm::Error),
@@ -43,32 +48,45 @@ pub enum Error {
     Utf8(std::str::Utf8Error),
     #[error(transparent)]
     Repro(#[from] repro_utils::Error),
-    #[error("Git URL doesn't exist. Please provide corresponding source code path using `--repo <source_code_path>`")]
-    GitUrlNotFound,
-    #[error("Invalid git URL. Please provide the corresponding source code using `--repo <source_code_path>`")]
-    InvalidGitUrl,
+    #[error("Git URL is not provided.")]
+    GitUrlNotProvided,
+    #[error("Invalid git URL {url}.")]
+    InvalidGitUrl { url: String },
+    #[error("Project {name} not found in path {path}.")]
+    ProjectNotFound { name: String, path: String },
     #[error(transparent)]
     Rpc(#[from] rpc::Error),
     #[error(transparent)]
     Config(#[from] config::Error),
-    #[error("Cannot parse contract ID {contract_id}: {error}")]
+    #[error("Cannot parse contract ID {contract_id}: {error}.")]
     CannotParseContractId {
         contract_id: String,
         error: locator::Error,
     },
-    #[error("Cannot parse WASM hash {wasm_hash}: {error}")]
+    #[error("Cannot parse WASM hash {wasm_hash}: {error}.")]
     CannotParseWasmHash {
         wasm_hash: String,
         error: stellar_strkey::DecodeError,
     },
     #[error("WASM build with unsupported nightly WASM toolchain. Not reproducible.")]
     Nightly,
+    #[error("Rustc not found in the contract's metadata.")]
+    RustcNotFound,
+    #[error("Reproduced WASM file is different from the original! Size diff: {size_diff}.")]
+    SizeDiff { size_diff: u32 },
+    #[error("Reproduced WASM file is different from the original! Bytes diff: {bytes_diff}.")]
+    BytesDiff { bytes_diff: u32 },
+    #[error(transparent)]
+    ReadingUserInput(io::Error),
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Cmd {
     #[command(subcommand)]
     wasm_src: CmdWasmSrc,
+    /// Building without `--locked`
+    #[arg(long, default_value_t = false)]
+    build_w_o_locked: bool,
     /// Path to the source code
     #[arg(long)]
     repo: Option<String>,
@@ -106,24 +124,24 @@ pub struct CmdWasmPath {
     wasm_path: PathBuf,
 }
 
-#[derive(Debug, Default)]
-struct ContractMetadata {
-    rustc: Option<String>,
-    target_dir: String,
-    workspace_root: String,
-    package_manifest_path: String,
-    package_name: String,
-    project_name: String,
-    git_url: String,
-    commit_hash: String,
-    is_optimized: bool,
-}
-
 impl Cmd {
     pub async fn run(&self) -> Result<(), Error> {
+        if self.build_w_o_locked {
+            eprintln!(
+                "{}",
+                "Warning: Building without `--locked`. Build will not be reproducible."
+                    .red()
+                    .bold()
+            );
+
+            let mut input = String::new();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(Error::ReadingUserInput)?;
+        }
+
         let current_dir = std::env::current_dir().map_err(Error::CurrentDir)?;
         let repro_dir = current_dir.join(CONTRACT_REPRO_PATH);
-
         fs::create_dir_all(&repro_dir).map_err(Error::CreatingDirectory)?;
 
         let wasm_path: PathBuf = match &self.wasm_src {
@@ -143,14 +161,14 @@ impl Cmd {
             CmdWasmSrc::WasmPath(wasm) => wasm.wasm_path.to_path_buf(),
         };
 
-        let metadata = load_contract_metadata(&wasm_path)?;
-
-        // fixme error if no metadata.rustc
+        let metadata = repro_utils::load_contract_metadata_from_path(&wasm_path)?;
 
         if let Some(ref rustc) = metadata.rustc {
             if rustc.contains("nightly") {
                 return Err(Error::Nightly);
             }
+        } else {
+            return Err(Error::RustcNotFound);
         }
 
         let wasm = wasm::Args { wasm: wasm_path };
@@ -163,31 +181,47 @@ impl Cmd {
         if let Some(repo_dir) = &self.repo {
             // fixme reexamine this logic
             if !repo_dir.contains(&metadata.project_name) {
-                // fixme return error
-                eprintln!(
-                    "Can't find the project {} in path: {}. Please input the right repo path.",
-                    metadata.project_name, repo_dir
-                );
-                return Ok(());
+                return Err(Error::ProjectNotFound {
+                    name: metadata.project_name,
+                    path: repo_dir.to_string(),
+                });
             }
             if let Some(dir) = repo_dir.split(&metadata.project_name).next() {
                 git_dir = Path::new(&dir).join(&metadata.project_name);
             }
         } else {
             if metadata.git_url.is_empty() {
-                // fixme embed git url
-                return Err(Error::GitUrlNotFound);
+                return Err(Error::GitUrlNotProvided);
             }
 
-            if !is_git_url_valid(&metadata.git_url) {
-                // fixme embed git url
-                return Err(Error::InvalidGitUrl);
+            if !validate_git_url(&metadata.git_url) {
+                return Err(Error::InvalidGitUrl {
+                    url: metadata.git_url.to_string(),
+                });
             }
 
             let mut git_cmd = Command::new("git");
             git_cmd.args(["clone", &metadata.git_url, &git_dir.to_string_lossy()]);
-            git_cmd.status().map_err(Error::GitCmd)?;
-            // fixme check exit code
+            let git_cmd_str = format!(
+                "{}",
+                &git_cmd.get_args().map(OsStr::to_string_lossy).join(" ")
+            );
+
+            let status = git_cmd.status().map_err(Error::GitCmd)?;
+            if !status.success() {
+                match status.code() {
+                    Some(code) => {
+                        if code != 128 {
+                            return Err(Error::GitCmdStatus { code });
+                        }
+                    }
+                    None => {
+                        return Err(Error::GitCmdTerminated {
+                            git_cmd: git_cmd_str.to_string(),
+                        })
+                    }
+                }
+            }
         }
 
         let package_manifest_path = git_dir.join(&metadata.package_manifest_path);
@@ -195,8 +229,22 @@ impl Cmd {
         let mut git_cmd = Command::new("git");
         git_cmd.current_dir(&git_dir);
         git_cmd.args(["checkout", &metadata.commit_hash]);
-        git_cmd.status().map_err(Error::GitCmd)?;
-        // fixme check exit code
+        let git_cmd_str = format!(
+            "{}",
+            &git_cmd.get_args().map(OsStr::to_string_lossy).join(" ")
+        );
+
+        let status = git_cmd.status().map_err(Error::GitCmd)?;
+        if !status.success() {
+            match status.code() {
+                Some(code) => return Err(Error::GitCmdStatus { code }),
+                None => {
+                    return Err(Error::GitCmdTerminated {
+                        git_cmd: git_cmd_str.to_string(),
+                    })
+                }
+            }
+        }
 
         if let Some(rustc) = &metadata.rustc {
             let mut rustup_cmd = Command::new("rustup");
@@ -228,6 +276,9 @@ impl Cmd {
             "--out-dir",
             &repro_dir.to_string_lossy(),
         ]);
+        if !self.build_w_o_locked {
+            soroban_cmd.arg("--locked");
+        }
 
         if let Some(rustc) = &metadata.rustc {
             soroban_cmd.env("RUSTUP_TOOLCHAIN", rustc);
@@ -269,94 +320,36 @@ impl Cmd {
         let pre_buf_len = pre_buf.len();
         let new_buf_len = new_buf.len();
         if pre_buf_len != new_buf_len {
-            eprintln!(
-                "{}",
-                format!(
-                    "They are different! Size diff: {}",
-                    pre_buf_len.abs_diff(new_buf_len)
-                )
-                .red()
-                .bold()
-            );
-            // fixme return error
-            return Ok(());
+            let size_diff = pre_buf_len.abs_diff(new_buf_len) as u32;
+            return Err(Error::SizeDiff { size_diff });
         }
 
-        let num = pre_buf
+        let bytes_diff = pre_buf
             .iter()
             .zip(new_buf.iter())
             .filter(|(a, b)| a != b)
-            .count();
-        if num > 0 {
-            eprintln!(
-                "{}",
-                format!("They are different! Bytes diff: {}", num)
-                    .red()
-                    .bold()
-            );
-            // fixme return error
-        } else {
-            eprintln!("{}", "They are the same!".green().bold());
+            .count() as u32;
+        if bytes_diff > 0 {
+            return Err(Error::BytesDiff { bytes_diff });
         }
+
+        eprintln!(
+            "{}",
+            "Reproduced WASM file is the same as the original!"
+                .green()
+                .bold()
+        );
 
         Ok(())
     }
 }
 
-// fixme move to repro_utils
-fn load_contract_metadata(wasm: &PathBuf) -> Result<ContractMetadata, Error> {
-    let metadata = repro_utils::read_wasm_contractmeta_file(wasm)?;
-
-    let mut contract_metadata = ContractMetadata::default();
-    metadata.iter().for_each(
-        |ScMetaEntry::ScMetaV0(data)| match data.key.to_string().as_str() {
-            "target_dir" => contract_metadata.target_dir = data.val.to_string(),
-            "workspace_root" => contract_metadata.workspace_root = data.val.to_string(),
-            "package_manifest_path" => {
-                contract_metadata.package_manifest_path = data.val.to_string()
-            }
-            "package_name" => contract_metadata.package_name = data.val.to_string(),
-            "project_name" => contract_metadata.project_name = data.val.to_string(),
-            "git_url" => contract_metadata.git_url = data.val.to_string(),
-            "commit_hash" => contract_metadata.commit_hash = data.val.to_string(),
-            "rsver" => contract_metadata.rustc = Some(data.val.to_string()),
-            "wasm_opt" => {
-                contract_metadata.is_optimized = match data.val.to_string().as_str() {
-                    "true" => true,
-                    _ => false,
-                }
-            }
-            _ => {}
-        },
-    );
-
-    Ok(contract_metadata)
-}
-
-// fixme return error with error message, rename `validate_git_url`
-fn is_git_url_valid(git_url: &str) -> bool {
-    let mut git_cmd = Command::new("git");
-    git_cmd.args(["ls-remote", git_url]);
-    git_cmd.env("GIT_TERMINAL_PROMPT", "0");
-
-    let mut is_valid = false;
-
-    let output = git_cmd.output();
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                is_valid = true;
-            } else {
-                let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
-                eprintln!("Failed to access the repository: {}", stderr);
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to execute git command: {}", e);
-        }
-    }
-
-    is_valid
+fn validate_git_url(git_url: &str) -> bool {
+    let re = Regex::new(
+        r"^(https:\/\/(\w+@)?|git@)[\w.-]+(\.[\w.-]+)+(\/|:)[\w._-]+\/[\w._-]+(\.git)?$",
+    )
+    .unwrap();
+    re.is_match(git_url)
 }
 
 #[async_trait::async_trait]

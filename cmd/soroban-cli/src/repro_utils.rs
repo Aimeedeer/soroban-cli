@@ -1,9 +1,10 @@
 use cargo_metadata::Package;
 use crate::xdr::{self, ReadXdr};
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Cursor};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str;
 use std::str::FromStr;
@@ -32,6 +33,19 @@ pub enum Error {
     ReadingWasmFile(io::Error),
     #[error("copying wasm file: {0}")]
     CopyingWasmFile(io::Error),
+}
+
+#[derive(Debug, Default)]
+pub struct ContractMetadata {
+    pub rustc: Option<String>,
+    pub target_dir: String,
+    pub workspace_root: String,
+    pub package_manifest_path: String,
+    pub package_name: String,
+    pub project_name: String,
+    pub git_url: String,
+    pub commit_hash: String,
+    pub is_optimized: bool,
 }
 
 pub fn read_wasm_contractmeta(contract_buf: &[u8]) -> Result<Vec<ScMetaEntry>, Error> {
@@ -217,54 +231,30 @@ pub fn update_build_contractmeta_in_contract(
     let target_file_path = file_path.join(&target_file);
 
     let contract_buf = fs::read(&target_file_path).map_err(Error::ReadingWasmFile)?;
-    // fixme does this append duplicate metadata if cargo build
-    // is run successfully multiple times?
-    let mut meta = read_wasm_contractmeta(&contract_buf)?;
 
-    meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
-        key: StringM::from_str("target_dir").expect("StringM"),
-        val: StringM::from_str(&relative_target_dir).expect("StringM"),
-    }));
+    let metadata_map: BTreeMap<StringM, ScMetaEntry> = read_wasm_contractmeta(&contract_buf)?
+        .into_iter()
+        .map(|entry| match entry {
+            ScMetaEntry::ScMetaV0(ScMetaV0 { ref key, .. }) => (key.clone(), entry.clone()),
+        })
+        .collect();
 
-    meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
-        key: StringM::from_str("workspace_root").expect("StringM"),
-        val: StringM::from_str(&relative_workspace_root).expect("StringM"),
-    }));
-
-    meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
-        key: StringM::from_str("package_manifest_path").expect("StringM"),
-        val: StringM::from_str(&relative_package_manifest_path).expect("StringM"),
-    }));
-
-    meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
-        key: StringM::from_str("package_name").expect("StringM"),
-        val: StringM::from_str(&p.name).expect("StringM"),
-    }));
-
-    meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
-        key: StringM::from_str("project_name").expect("StringM"),
-        val: StringM::from_str(&git_data.project_name).expect("StringM"),
-    }));
-
-    meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
-        key: StringM::from_str("git_url").expect("StringM"),
-        val: StringM::from_str(&git_data.remote_url).expect("StringM"),
-    }));
-
-    meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
-        key: StringM::from_str("commit_hash").expect("StringM"),
-        val: StringM::from_str(&git_data.commit_hash).expect("StringM"),
-    }));
-
-    let soroban_cli_version = env!("CARGO_PKG_VERSION");
-    meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
-        key: StringM::from_str("soroban_cli_version").expect("StringM"),
-        val: StringM::from_str(soroban_cli_version).expect("StringM"),
-    }));
+    let new_metadata = [
+        ("target_dir", relative_target_dir),
+        ("workspace_root", relative_workspace_root),
+        ("package_manifest_path", relative_package_manifest_path),
+        ("package_name", &p.name),
+        ("project_name", &git_data.project_name),
+        ("git_url", &git_data.remote_url),
+        ("commit_hash", &git_data.commit_hash),
+        ("soroban_cli_version", env!("CARGO_PKG_VERSION")),
+    ];
+    let metadata_map = insert_new_metadata(&new_metadata, &metadata_map);
 
     let mut cursor = Limited::new(Cursor::new(vec![]), Limits::none());
-    meta.iter()
-        .for_each(|data| data.write_xdr(&mut cursor).unwrap());
+    metadata_map
+        .iter()
+        .for_each(|(_, data)| data.write_xdr(&mut cursor).unwrap());
     let meta_xdr = cursor.inner.into_inner();
 
     let custom_section = CustomSection {
@@ -285,4 +275,49 @@ pub fn update_build_contractmeta_in_contract(
     fs::rename(&temp_file_path, target_file_path).map_err(Error::CopyingWasmFile)?;
 
     Ok(())
+}
+
+pub fn load_contract_metadata_from_path(wasm: &PathBuf) -> Result<ContractMetadata, Error> {
+    let metadata = read_wasm_contractmeta_file(wasm)?;
+
+    let mut contract_metadata = ContractMetadata::default();
+    metadata.iter().for_each(
+        |ScMetaEntry::ScMetaV0(data)| match data.key.to_string().as_str() {
+            "target_dir" => contract_metadata.target_dir = data.val.to_string(),
+            "workspace_root" => contract_metadata.workspace_root = data.val.to_string(),
+            "package_manifest_path" => {
+                contract_metadata.package_manifest_path = data.val.to_string()
+            }
+            "package_name" => contract_metadata.package_name = data.val.to_string(),
+            "project_name" => contract_metadata.project_name = data.val.to_string(),
+            "git_url" => contract_metadata.git_url = data.val.to_string(),
+            "commit_hash" => contract_metadata.commit_hash = data.val.to_string(),
+            "rsver" => contract_metadata.rustc = Some(data.val.to_string()),
+            "wasm_opt" => {
+                contract_metadata.is_optimized = match data.val.to_string().as_str() {
+                    "true" => true,
+                    _ => false,
+                }
+            }
+            _ => {}
+        },
+    );
+
+    Ok(contract_metadata)
+}
+
+fn insert_new_metadata(
+    data: &[(&str, &str)],
+    metadata_map: &BTreeMap<StringM, ScMetaEntry>,
+) -> BTreeMap<StringM, ScMetaEntry> {
+    let mut metadata_map = metadata_map.clone();
+
+    data.iter().for_each(|(key, val)| {
+        let key = StringM::from_str(key).expect("StringM");
+        let val = StringM::from_str(val).expect("StringM");
+
+        metadata_map.insert(key.clone(), ScMetaEntry::ScMetaV0(ScMetaV0 { key, val }));
+    });
+
+    metadata_map
 }
