@@ -111,12 +111,10 @@ impl Cmd {
 
         for p in packages {
             // fixme optionall get cargo name from CARGO, write cargo_bin fn
-            let mut cmd = Command::new("cargo");
+            let cargo_bin = env::var("CARGO").unwrap_or("cargo".to_string());
+            let mut cmd = Command::new(cargo_bin);
             cmd.stdout(Stdio::piped());
             cmd.arg("rustc");
-            // fixme turn this into a command line argument. when not building with locked
-            // emit a warning "Warning: Building without `--locked`. Build will not be reproducible"
-            cmd.arg("--locked");
             let manifest_path = pathdiff::diff_paths(&p.manifest_path, &working_dir)
                 .unwrap_or(p.manifest_path.clone().into());
             cmd.arg(format!(
