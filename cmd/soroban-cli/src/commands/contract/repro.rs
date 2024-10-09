@@ -27,13 +27,13 @@ pub enum Error {
     GitCmd(io::Error),
     #[error(transparent)]
     CreatingDirectory(io::Error),
-    #[error("exit status {0}")]
+    #[error("Exit status {0}")]
     Exit(ExitStatus),
-    #[error("package {package} not found")]
+    #[error("Package {package} not found")]
     PackageNotFound { package: String },
-    #[error("reading wasm file: {0}")]
+    #[error("Reading WASM file: {0}")]
     ReadingWasmFile(io::Error),
-    #[error("writing wasm file: {0}")]
+    #[error("Writing WASM file: {0}")]
     WritingWasmFile(io::Error),
     #[error(transparent)]
     Wasm(#[from] wasm::Error),
@@ -43,24 +43,26 @@ pub enum Error {
     Utf8(std::str::Utf8Error),
     #[error(transparent)]
     Repro(#[from] repro_utils::Error),
-    #[error("Git url doesn't exist. Please provide corrolated source code path using `--repo <source_code_path>`")]
+    #[error("Git URL doesn't exist. Please provide corresponding source code path using `--repo <source_code_path>`")]
     GitUrlNotFound,
-    #[error("Invalid git url. Please provide the corrolated source code using `--repo <source_code_path>`")]
+    #[error("Invalid git URL. Please provide the corresponding source code using `--repo <source_code_path>`")]
     InvalidGitUrl,
     #[error(transparent)]
     Rpc(#[from] rpc::Error),
     #[error(transparent)]
     Config(#[from] config::Error),
-    #[error("cannot parse contract ID {contract_id}: {error}")]
+    #[error("Cannot parse contract ID {contract_id}: {error}")]
     CannotParseContractId {
         contract_id: String,
         error: locator::Error,
     },
-    #[error("cannot parse WASM hash {wasm_hash}: {error}")]
+    #[error("Cannot parse WASM hash {wasm_hash}: {error}")]
     CannotParseWasmHash {
         wasm_hash: String,
         error: stellar_strkey::DecodeError,
     },
+    #[error("WASM build with unsupported nightly WASM toolchain. Not reproducible.")]
+    Nightly,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -143,10 +145,11 @@ impl Cmd {
 
         let metadata = load_contract_metadata(&wasm_path)?;
 
+        // fixme error if no metadata.rustc
+
         if let Some(ref rustc) = metadata.rustc {
             if rustc.contains("nightly") {
-                println!("Wasm not reproducible with nightly toolchains");
-                return Ok(());
+                return Err(Error::Nightly);
             }
         }
 
@@ -158,8 +161,10 @@ impl Cmd {
         let mut git_dir = work_dir.join(&metadata.project_name);
 
         if let Some(repo_dir) = &self.repo {
+            // fixme reexamine this logic
             if !repo_dir.contains(&metadata.project_name) {
-                println!(
+                // fixme return error
+                eprintln!(
                     "Can't find the project {} in path: {}. Please input the right repo path.",
                     metadata.project_name, repo_dir
                 );
@@ -170,16 +175,19 @@ impl Cmd {
             }
         } else {
             if metadata.git_url.is_empty() {
+                // fixme embed git url
                 return Err(Error::GitUrlNotFound);
             }
 
             if !is_git_url_valid(&metadata.git_url) {
+                // fixme embed git url
                 return Err(Error::InvalidGitUrl);
             }
 
             let mut git_cmd = Command::new("git");
             git_cmd.args(["clone", &metadata.git_url, &git_dir.to_string_lossy()]);
             git_cmd.status().map_err(Error::GitCmd)?;
+            // fixme check exit code
         }
 
         let package_manifest_path = git_dir.join(&metadata.package_manifest_path);
@@ -188,6 +196,25 @@ impl Cmd {
         git_cmd.current_dir(&git_dir);
         git_cmd.args(["checkout", &metadata.commit_hash]);
         git_cmd.status().map_err(Error::GitCmd)?;
+        // fixme check exit code
+
+        if let Some(rustc) = &metadata.rustc {
+            let mut rustup_cmd = Command::new("rustup");
+            rustup_cmd.args(["toolchain", "install", rustc]);
+            let status = rustup_cmd.status().map_err(Error::RustupCmd)?;
+            if !status.success() {
+                return Err(Error::Exit(status));
+            }
+
+            let mut rustup_cmd = Command::new("rustup");
+            rustup_cmd.args(["target", "add", "wasm32-unknown-unknown"]);
+            rustup_cmd.args(["--toolchain", rustc]);
+
+            let status = rustup_cmd.status().map_err(Error::RustupCmd)?;
+            if !status.success() {
+                return Err(Error::Exit(status));
+            }
+        }
 
         let soroban_path = std::env::current_exe().unwrap();
         let mut soroban_cmd = Command::new(&soroban_path);
@@ -202,24 +229,8 @@ impl Cmd {
             &repro_dir.to_string_lossy(),
         ]);
 
-        if let Some(rustc) = metadata.rustc {
-            soroban_cmd.env("RUSTUP_TOOLCHAIN", &rustc);
-
-            let mut rustup_cmd = Command::new("rustup");
-            rustup_cmd.args(["toolchain", "install", &rustc]);
-            let status = rustup_cmd.status().map_err(Error::RustupCmd)?;
-            if !status.success() {
-                return Err(Error::Exit(status));
-            }
-
-            let mut rustup_cmd = Command::new("rustup");
-            rustup_cmd.args(["target", "add", "wasm32-unknown-unknown"]);
-            rustup_cmd.args(["--toolchain", &rustc]);
-
-            let status = rustup_cmd.status().map_err(Error::RustupCmd)?;
-            if !status.success() {
-                return Err(Error::Exit(status));
-            }
+        if let Some(rustc) = &metadata.rustc {
+            soroban_cmd.env("RUSTUP_TOOLCHAIN", rustc);
         }
 
         let status = soroban_cmd.status().map_err(Error::CargoCmd)?;
@@ -258,7 +269,7 @@ impl Cmd {
         let pre_buf_len = pre_buf.len();
         let new_buf_len = new_buf.len();
         if pre_buf_len != new_buf_len {
-            println!(
+            eprintln!(
                 "{}",
                 format!(
                     "They are different! Size diff: {}",
@@ -267,6 +278,7 @@ impl Cmd {
                 .red()
                 .bold()
             );
+            // fixme return error
             return Ok(());
         }
 
@@ -276,20 +288,22 @@ impl Cmd {
             .filter(|(a, b)| a != b)
             .count();
         if num > 0 {
-            println!(
+            eprintln!(
                 "{}",
                 format!("They are different! Bytes diff: {}", num)
                     .red()
                     .bold()
             );
+            // fixme return error
         } else {
-            println!("{}", "They are the same!".green().bold());
+            eprintln!("{}", "They are the same!".green().bold());
         }
 
         Ok(())
     }
 }
 
+// fixme move to repro_utils
 fn load_contract_metadata(wasm: &PathBuf) -> Result<ContractMetadata, Error> {
     let metadata = repro_utils::read_wasm_contractmeta_file(wasm)?;
 
@@ -319,6 +333,7 @@ fn load_contract_metadata(wasm: &PathBuf) -> Result<ContractMetadata, Error> {
     Ok(contract_metadata)
 }
 
+// fixme return error with error message, rename `validate_git_url`
 fn is_git_url_valid(git_url: &str) -> bool {
     let mut git_cmd = Command::new("git");
     git_cmd.args(["ls-remote", git_url]);
@@ -333,11 +348,11 @@ fn is_git_url_valid(git_url: &str) -> bool {
                 is_valid = true;
             } else {
                 let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
-                println!("Failed to access the repository: {}", stderr);
+                eprintln!("Failed to access the repository: {}", stderr);
             }
         }
         Err(e) => {
-            println!("Failed to execute git command: {}", e);
+            eprintln!("Failed to execute git command: {}", e);
         }
     }
 

@@ -2,8 +2,12 @@ use crate::repro_utils;
 use crate::wasm;
 use clap::{arg, command, Parser};
 use std::fmt::Debug;
+#[cfg(feature = "opt")]
 use std::str::FromStr;
-use std::{fs, io};
+use std::io;
+#[cfg(feature = "opt")]
+use std::fs;
+#[cfg(feature = "opt")]
 use stellar_xdr::curr::{ScMetaEntry, ScMetaV0, StringM};
 #[cfg(feature = "opt")]
 use wasm_opt::{Feature, OptimizationError, OptimizationOptions};
@@ -92,6 +96,7 @@ impl Cmd {
         Ok(())
     }
 
+    #[cfg(feature = "opt")]
     fn update_metadata(&self, wasm_out: &std::path::PathBuf) -> Result<(), Error> {
         let meta_entry = ScMetaEntry::ScMetaV0(ScMetaV0 {
             key: StringM::from_str("wasm_opt").expect("StringM"),
@@ -112,6 +117,7 @@ impl Cmd {
         Ok(())
     }
 
+    #[cfg(feature = "opt")]
     fn is_already_optimized(&self) -> Result<bool, Error> {
         let metadata = repro_utils::read_wasm_contractmeta_file(&self.wasm.wasm)?;
 

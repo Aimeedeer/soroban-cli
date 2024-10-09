@@ -103,6 +103,15 @@ pub fn read_wasm_without_contractmeta_file(contract_path: &Path) -> Result<Vec<u
     read_wasm_without_contractmeta(&buf)
 }
 
+fn calc_section_header_size(range: &std::ops::Range<usize>) -> usize {
+    let len = range.end - range.start;
+    let mut buf = Vec::new();
+    let int_enc_size = leb128::write::unsigned(&mut buf, len as u64);
+    let int_enc_size = int_enc_size.expect("leb128 write");
+    let section_id_byte = 1;
+    int_enc_size + section_id_byte
+}
+
 pub fn update_customsection_metadata(
     contract_path: &Path,
     meta_entry: ScMetaEntry,
@@ -127,22 +136,15 @@ pub fn update_customsection_metadata(
     Ok(wasm)
 }
 
-fn calc_section_header_size(range: &std::ops::Range<usize>) -> usize {
-    let len = range.end - range.start;
-    let mut buf = Vec::new();
-    let int_enc_size = leb128::write::unsigned(&mut buf, len as u64);
-    let int_enc_size = int_enc_size.expect("leb128 write");
-    let section_id_byte = 1;
-    int_enc_size + section_id_byte
-}
-
 #[derive(Debug, Default)]
 pub struct GitData {
     pub commit_hash: String,
     pub remote_url: String,
+    // fixme project_name is probably not the right name for this
     pub project_name: String,
 }
 
+// fixme this is all very fragile
 pub fn git_data(workspace_root: &str) -> Result<GitData, Error> {
     let mut git_data = GitData::default();
 
@@ -154,20 +156,6 @@ pub fn git_data(workspace_root: &str) -> Result<GitData, Error> {
         .map_err(Error::Utf8)?
         .trim()
         .to_string();
-
-    /*let mut git_cmd = Command::new("git");
-    git_cmd.current_dir(workspace_root);
-    git_cmd.args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-    let output = git_cmd.output().map_err(Error::GitCmd)?;
-    let mut remote_name = str::from_utf8(&output.stdout)
-        .map_err(Error::Utf8)?
-        .trim()
-        .to_string();
-    remote_name = remote_name
-        .split('/')
-        .next()
-        .expect("Git remote name")
-        .to_string();*/
 
     let remote_name = "origin";
 
@@ -199,6 +187,7 @@ pub fn git_data(workspace_root: &str) -> Result<GitData, Error> {
     Ok(git_data)
 }
 
+// fixme warn if rustc contains "nightly", like in repro.rs
 pub fn update_build_contractmeta_in_contract(
     profile: &str,
     target_dir: &str,
@@ -206,6 +195,7 @@ pub fn update_build_contractmeta_in_contract(
     p: &Package,
     git_data: &GitData,
 ) -> Result<(), Error> {
+    // fixme this logic won't work if the directory doesn't have the same name as the github repo
     let mut v: Vec<&str> = target_dir.split(&git_data.project_name).collect();
     v.reverse();
     let relative_target_dir = v[0].trim_start_matches("/");
@@ -227,6 +217,8 @@ pub fn update_build_contractmeta_in_contract(
     let target_file_path = file_path.join(&target_file);
 
     let contract_buf = fs::read(&target_file_path).map_err(Error::ReadingWasmFile)?;
+    // fixme does this append duplicate metadata if cargo build
+    // is run successfully multiple times?
     let mut meta = read_wasm_contractmeta(&contract_buf)?;
 
     meta.push(ScMetaEntry::ScMetaV0(ScMetaV0 {
