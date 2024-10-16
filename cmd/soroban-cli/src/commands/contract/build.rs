@@ -1,5 +1,6 @@
 use cargo_metadata::{Metadata, MetadataCommand, Package};
 use clap::Parser;
+use colored::*;
 use itertools::Itertools;
 use std::{
     collections::HashSet,
@@ -67,6 +68,9 @@ pub struct Cmd {
     /// Add key-value to contract meta (adds the meta to the `contractmetav0` custom section)
     #[arg(long, num_args=1, value_parser=parse_meta_arg, action=clap::ArgAction::Append, help_heading = "Metadata")]
     pub meta: Vec<(String, String)>,
+    /// Build with `--locked`
+    #[arg(long)]
+    pub locked: bool,
 }
 
 fn parse_meta_arg(s: &str) -> Result<(String, String), Error> {
@@ -108,6 +112,8 @@ pub enum Error {
     CargoHome(io::Error),
     #[error(transparent)]
     Repro(#[from] repro_utils::Error),
+    #[error(transparent)]
+    ReadingUserInput(io::Error),
 }
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
@@ -115,14 +121,26 @@ const META_CUSTOM_SECTION_NAME: &str = "contractmetav0";
 
 impl Cmd {
     pub fn run(&self) -> Result<(), Error> {
+        if !self.locked {
+            eprintln!(
+                "{}",
+                "Warning: Building without `--locked`. Build will not be reproducible. Press any key to continue..."
+                    .red()
+                    .bold()
+            );
+            let mut input = String::new();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(Error::ReadingUserInput)?;
+        }
+
         let working_dir = env::current_dir().map_err(Error::GettingCurrentDir)?;
 
         let metadata = self.metadata()?;
         let packages = self.packages(&metadata)?;
-        let workspace_root = &metadata.workspace_root;
         let target_dir = &metadata.target_directory;
 
-        let git_data = repro_utils::git_data(&metadata.workspace_root.as_str())?;
+        let git_info = repro_utils::git_info(&metadata)?;
 
         if let Some(package) = &self.package {
             if packages.is_empty() {
@@ -133,7 +151,6 @@ impl Cmd {
         }
 
         for p in packages {
-            // fixme optionall get cargo name from CARGO, write cargo_bin fn
             let cargo_bin = env::var("CARGO").unwrap_or("cargo".to_string());
             let mut cmd = Command::new(cargo_bin);
             cmd.stdout(Stdio::piped());
@@ -156,6 +173,9 @@ impl Cmd {
             }
             if self.no_default_features {
                 cmd.arg("--no-default-features");
+            }
+            if self.locked {
+                cmd.arg("--locked");
             }
             if let Some(features) = self.features() {
                 let requested: HashSet<String> = features.iter().cloned().collect();
@@ -187,12 +207,11 @@ impl Cmd {
                     .join(&file);
 
                 self.handle_contract_metadata_args(&target_file_path)?;
-                repro_utils::update_build_contractmeta_in_contract(
+                repro_utils::update_wasm_contractmeta_after_build(
                     &self.profile,
-                    target_dir.as_str(),
-                    workspace_root.as_str(),
                     &p,
-                    &git_data,
+                    &metadata,
+                    &git_info,
                 )?;
 
                 if let Some(out_dir) = &self.out_dir {
@@ -201,8 +220,7 @@ impl Cmd {
                     fs::copy(target_file_path, out_file_path).map_err(Error::CopyingWasmFile)?;
                 }
             }
-        }
-
+	}
         Ok(())
     }
 

@@ -1,5 +1,6 @@
 use cargo_metadata::Package;
 use crate::xdr::{self, ReadXdr};
+use colored::*;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,12 +15,12 @@ use wasmparser::{Parser as WasmParser, Payload};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("reading file {filepath}: {error}")]
+    #[error("Reading file {filepath}: {error}")]
     CannotReadContractFile {
         filepath: std::path::PathBuf,
         error: io::Error,
     },
-    #[error("xdr processing error: {0}")]
+    #[error("Xdr processing error: {0}")]
     Xdr(#[from] xdr::Error),
     #[error(transparent)]
     Parser(#[from] wasmparser::BinaryReaderError),
@@ -27,30 +28,40 @@ pub enum Error {
     GitCmd(io::Error),
     #[error(transparent)]
     Utf8(std::str::Utf8Error),
-    #[error("writing wasm file: {0}")]
+    #[error("Writing wasm file: {0}")]
     WritingWasmFile(io::Error),
-    #[error("reading wasm file: {0}")]
-    ReadingWasmFile(io::Error),
-    #[error("copying wasm file: {0}")]
+    #[error("Copying wasm file: {0}")]
     CopyingWasmFile(io::Error),
+    #[error("Failed fetching Git repository. Exited with status code: {code}.")]
+    FetchingGitRepo { code: u16 },
+    #[error("Failed fetching Git information. Exited with status code: {code}.")]
+    FetchingGitInfo { code: i32 },
+    #[error(transparent)]
+    ParsingGitRepo(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Default)]
-pub struct ContractMetadata {
-    pub rustc: Option<String>,
-    pub target_dir: String,
-    pub workspace_root: String,
-    pub package_manifest_path: String,
+pub struct ReproMeta {
     pub package_name: String,
-    pub project_name: String,
+    pub relative_manifest_path: String,
     pub git_url: String,
     pub commit_hash: String,
+    pub rustc: Option<String>,
     pub is_optimized: bool,
 }
 
-pub fn read_wasm_contractmeta(contract_buf: &[u8]) -> Result<Vec<ScMetaEntry>, Error> {
+pub fn read_wasm(wasm_path: &PathBuf) -> Result<Vec<u8>, Error> {
+    let buf = fs::read(wasm_path).map_err(|e| Error::CannotReadContractFile {
+        filepath: wasm_path.to_owned(),
+        error: e,
+    })?;
+
+    Ok(buf)
+}
+
+pub fn read_wasm_contractmeta(buf: &[u8]) -> Result<Vec<ScMetaEntry>, Error> {
     let mut meta = vec![];
-    for payload in WasmParser::new(0).parse_all(contract_buf) {
+    for payload in WasmParser::new(0).parse_all(buf) {
         match payload? {
             Payload::CustomSection(s) => match s.name() {
                 "contractmetav0" => {
@@ -71,19 +82,11 @@ pub fn read_wasm_contractmeta(contract_buf: &[u8]) -> Result<Vec<ScMetaEntry>, E
     Ok(meta)
 }
 
-pub fn read_wasm_contractmeta_file(contract_path: &Path) -> Result<Vec<ScMetaEntry>, Error> {
-    let buf = fs::read(contract_path).map_err(|e| Error::CannotReadContractFile {
-        filepath: contract_path.to_owned(),
-        error: e,
-    })?;
-    read_wasm_contractmeta(&buf)
-}
-
-pub fn read_wasm_without_contractmeta(contract_buf: &[u8]) -> Result<Vec<u8>, Error> {
-    let buf_len = contract_buf.len();
+pub fn read_wasm_without_contractmeta(buf: &[u8]) -> Result<Vec<u8>, Error> {
+    let buf_len = buf.len();
     let mut module = Vec::with_capacity(buf_len);
 
-    for payload in WasmParser::new(0).parse_all(contract_buf) {
+    for payload in WasmParser::new(0).parse_all(buf) {
         match payload? {
             Payload::CustomSection(s) => match s.name() {
                 "contractmetav0" => {
@@ -92,12 +95,10 @@ pub fn read_wasm_without_contractmeta(contract_buf: &[u8]) -> Result<Vec<u8>, Er
 
                     assert!(range.start >= section_header_size);
                     if range.start > 0 {
-                        module.extend_from_slice(
-                            &contract_buf[0..(range.start - section_header_size)],
-                        );
+                        module.extend_from_slice(&buf[0..(range.start - section_header_size)]);
                     }
                     if range.end < buf_len {
-                        module.extend_from_slice(&contract_buf[range.end..buf_len]);
+                        module.extend_from_slice(&buf[range.end..buf_len]);
                     }
                 }
                 _ => {}
@@ -109,12 +110,147 @@ pub fn read_wasm_without_contractmeta(contract_buf: &[u8]) -> Result<Vec<u8>, Er
     Ok(module)
 }
 
-pub fn read_wasm_without_contractmeta_file(contract_path: &Path) -> Result<Vec<u8>, Error> {
-    let buf = fs::read(contract_path).map_err(|e| Error::CannotReadContractFile {
-        filepath: contract_path.to_owned(),
-        error: e,
-    })?;
-    read_wasm_without_contractmeta(&buf)
+pub fn read_wasm_reprometa(wasm: &PathBuf) -> Result<ReproMeta, Error> {
+    let wasm_buf = read_wasm(wasm)?;
+    let contract_meta = read_wasm_contractmeta(&wasm_buf)?;
+
+    let mut repro_meta = ReproMeta::default();
+    contract_meta
+        .iter()
+        .for_each(
+            |ScMetaEntry::ScMetaV0(data)| match data.key.to_string().as_str() {
+                "package_name" => repro_meta.package_name = data.val.to_string(),
+                "relative_manifest_path" => {
+                    repro_meta.relative_manifest_path = data.val.to_string()
+                }
+                "git_url" => repro_meta.git_url = data.val.to_string(),
+                "commit_hash" => repro_meta.commit_hash = data.val.to_string(),
+                "rsver" => repro_meta.rustc = Some(data.val.to_string()),
+                "wasm_opt" => {
+                    repro_meta.is_optimized = match data.val.to_string().as_str() {
+                        "true" => true,
+                        _ => false,
+                    }
+                }
+                _ => {}
+            },
+        );
+
+    Ok(repro_meta)
+}
+
+pub fn update_wasm_contractmeta(
+    contract_path: &PathBuf,
+    key: &str,
+    val: &str,
+) -> Result<Vec<u8>, Error> {
+    let metadata = [(key, val)];
+    let wasm_buf = read_wasm(&contract_path)?;
+
+    insert_metadata(&metadata, &wasm_buf)
+}
+
+pub fn update_wasm_contractmeta_after_build(
+    profile: &str,
+    p: &Package,
+    cargo_metadata: &cargo_metadata::Metadata,
+    git_info: &Option<GitInfo>,
+) -> Result<(), Error> {
+    if git_info.is_none() {
+        eprintln!(
+            "{}",
+            format!(
+                "Warning: Package {} doesn't have git information. Build will not be reproducible.",
+                &p.name
+            )
+            .yellow()
+            .bold()
+        );
+    }
+
+    let git_info = if let Some(info) = git_info {
+        info
+    } else {
+        &GitInfo::default()
+    };
+
+    let relative_manifest_path = pathdiff::diff_paths(&p.manifest_path, &git_info.root)
+        .unwrap_or(p.manifest_path.clone().into());
+    let metadata = [
+        ("package_name", p.name.as_str()),
+        (
+            "relative_manifest_path",
+            &relative_manifest_path.to_string_lossy(),
+        ),
+        ("git_url", &git_info.clone_url),
+        ("commit_hash", &git_info.commit_hash),
+        (
+            "soroban_cli_version",
+            &format!("{}", env!("CARGO_PKG_VERSION")),
+        ),
+    ];
+
+    let file_path = Path::new(&cargo_metadata.target_directory)
+        .join("wasm32-unknown-unknown")
+        .join(profile);
+    let target_file = format!("{}.wasm", p.name.replace('-', "_"));
+    let target_file_path = file_path.join(&target_file);
+
+    let wasm_buf = read_wasm(&target_file_path)?;
+    let wasm = insert_metadata(&metadata, &wasm_buf)?;
+
+    let backup_file_path = target_file_path.with_extension("backup.wasm");
+    fs::copy(&target_file_path, backup_file_path).map_err(Error::CopyingWasmFile)?;
+
+    let temp_file = format!("{}.{}.temp", target_file, rand::random::<u32>());
+    let temp_file_path = file_path.join(temp_file);
+
+    fs::write(&temp_file_path, wasm).map_err(Error::WritingWasmFile)?;
+    fs::rename(&temp_file_path, &target_file_path).map_err(Error::CopyingWasmFile)?;
+
+    let repro_meta = read_wasm_reprometa(&target_file_path)?;
+    if let Some(ref rustc) = repro_meta.rustc {
+        if rustc.contains("nightly") {
+            eprintln!(
+                "{}",
+                "Warning: Building with rust nightly. Build will not be reproducible."
+                    .yellow()
+                    .bold()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn insert_metadata(metadata: &[(&str, &str)], wasm_buf: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut metadata_map: BTreeMap<StringM, ScMetaEntry> = read_wasm_contractmeta(&wasm_buf)?
+        .into_iter()
+        .map(|entry| match entry {
+            ScMetaEntry::ScMetaV0(ScMetaV0 { ref key, .. }) => (key.clone(), entry.clone()),
+        })
+        .collect();
+
+    metadata.iter().for_each(|(key, val)| {
+        let key = StringM::from_str(key).expect("StringM");
+        let val = StringM::from_str(val).expect("StringM");
+
+        metadata_map.insert(key.clone(), ScMetaEntry::ScMetaV0(ScMetaV0 { key, val }));
+    });
+
+    let mut cursor = Limited::new(Cursor::new(vec![]), Limits::none());
+    metadata_map
+        .iter()
+        .for_each(|(_, data)| data.write_xdr(&mut cursor).unwrap());
+    let metadata_xdr = cursor.inner.into_inner();
+
+    let custom_section = CustomSection {
+        name: Cow::from("contractmetav0"),
+        data: Cow::from(metadata_xdr),
+    };
+
+    let mut wasm = read_wasm_without_contractmeta(&wasm_buf)?;
+    custom_section.append_to(&mut wasm);
+    Ok(wasm)
 }
 
 fn calc_section_header_size(range: &std::ops::Range<usize>) -> usize {
@@ -126,198 +262,75 @@ fn calc_section_header_size(range: &std::ops::Range<usize>) -> usize {
     int_enc_size + section_id_byte
 }
 
-pub fn update_customsection_metadata(
-    contract_path: &Path,
-    meta_entry: ScMetaEntry,
-) -> Result<Vec<u8>, Error> {
-    let mut metadata = read_wasm_contractmeta_file(contract_path)?;
-
-    metadata.push(meta_entry);
-
-    let mut cursor = Limited::new(Cursor::new(vec![]), Limits::none());
-    metadata
-        .iter()
-        .for_each(|data| data.write_xdr(&mut cursor).unwrap());
-    let metadata_xdr = cursor.inner.into_inner();
-
-    let custom_section = CustomSection {
-        name: Cow::from("contractmetav0"),
-        data: Cow::from(metadata_xdr),
-    };
-
-    let mut wasm = read_wasm_without_contractmeta_file(contract_path)?;
-    custom_section.append_to(&mut wasm);
-    Ok(wasm)
-}
-
 #[derive(Debug, Default)]
-pub struct GitData {
+pub struct GitInfo {
+    pub root: String,
+    pub clone_url: String,
     pub commit_hash: String,
-    pub remote_url: String,
-    // fixme project_name is probably not the right name for this
-    pub project_name: String,
 }
 
 // fixme this is all very fragile
-pub fn git_data(workspace_root: &str) -> Result<GitData, Error> {
-    let mut git_data = GitData::default();
-
+pub fn git_info(cargo_metadata: &cargo_metadata::Metadata) -> Result<Option<GitInfo>, Error> {
+    // Git root
     let mut git_cmd = Command::new("git");
-    git_cmd.current_dir(workspace_root);
+    git_cmd.current_dir(&cargo_metadata.workspace_root);
+    git_cmd.args(["rev-parse", "--show-toplevel"]);
+    let output = git_cmd.output().map_err(Error::GitCmd)?;
+    if !output.status.success() {
+        if let Some(code) = output.status.code() {
+            let err = str::from_utf8(&output.stderr).map_err(Error::Utf8)?;
+	    // If it's not git repository, return empty GitInfo
+            if err.contains("not a git repository") {
+                eprintln!("{}", err);
+                return Ok(None);
+            } else {
+                return Err(Error::FetchingGitInfo { code });
+            }
+        }
+    }
+    let root = str::from_utf8(&output.stdout)
+        .map_err(Error::Utf8)?
+        .trim()
+        .to_string();
+
+    // Git commit hash
+    let mut git_cmd = Command::new("git");
+    git_cmd.current_dir(&cargo_metadata.workspace_root);
     git_cmd.args(["rev-parse", "HEAD"]);
     let output = git_cmd.output().map_err(Error::GitCmd)?;
-    git_data.commit_hash = str::from_utf8(&output.stdout)
+    if !output.status.success() {
+        if let Some(code) = output.status.code() {
+            return Err(Error::FetchingGitInfo { code });
+        }
+    }
+    let commit_hash = str::from_utf8(&output.stdout)
         .map_err(Error::Utf8)?
         .trim()
         .to_string();
 
+    // Git remote url
     let remote_name = "origin";
-
     let mut git_cmd = Command::new("git");
-    git_cmd.current_dir(workspace_root);
+    git_cmd.current_dir(&cargo_metadata.workspace_root);
     git_cmd.args(["remote", "get-url", &remote_name]);
     let output = git_cmd.output().map_err(Error::GitCmd)?;
-    let mut url = str::from_utf8(&output.stdout)
+    if !output.status.success() {
+        if let Some(code) = output.status.code() {
+            return Err(Error::FetchingGitInfo { code });
+        }
+    }
+    let mut clone_url = str::from_utf8(&output.stdout)
         .map_err(Error::Utf8)?
         .trim()
         .to_string();
 
-    if url.starts_with("git@github.com:") {
-        url = url.replace("git@github.com:", "https://github.com/");
+    if clone_url.starts_with("git@github.com:") {
+        clone_url = clone_url.replace("git@github.com:", "https://github.com/");
     }
-    git_data.remote_url = url;
 
-    let mut tmp_str = git_data
-        .remote_url
-        .trim_start_matches("https://github.com/");
-    tmp_str = tmp_str.trim_end_matches(".git");
-    git_data.project_name = tmp_str
-        .split("/")
-        .skip(1)
-        .next()
-        .expect("Project name")
-        .to_string();
-
-    Ok(git_data)
-}
-
-// fixme warn if rustc contains "nightly", like in repro.rs
-pub fn update_build_contractmeta_in_contract(
-    profile: &str,
-    target_dir: &str,
-    workspace_root: &str,
-    p: &Package,
-    git_data: &GitData,
-) -> Result<(), Error> {
-    // fixme this logic won't work if the directory doesn't have the same name as the github repo
-    let mut v: Vec<&str> = target_dir.split(&git_data.project_name).collect();
-    v.reverse();
-    let relative_target_dir = v[0].trim_start_matches("/");
-
-    let mut v: Vec<&str> = workspace_root.split(&git_data.project_name).collect();
-    v.reverse();
-    let relative_workspace_root = v[0].trim_start_matches("/");
-
-    let manifest_path_str = p.manifest_path.as_str();
-    let mut v: Vec<&str> = manifest_path_str.split(&git_data.project_name).collect();
-    v.reverse();
-    let relative_package_manifest_path = v[0].trim_start_matches("/");
-
-    let file_path = Path::new(target_dir)
-        .join("wasm32-unknown-unknown")
-        .join(profile);
-
-    let target_file = format!("{}.wasm", p.name.replace('-', "_"));
-    let target_file_path = file_path.join(&target_file);
-
-    let contract_buf = fs::read(&target_file_path).map_err(Error::ReadingWasmFile)?;
-
-    let metadata_map: BTreeMap<StringM, ScMetaEntry> = read_wasm_contractmeta(&contract_buf)?
-        .into_iter()
-        .map(|entry| match entry {
-            ScMetaEntry::ScMetaV0(ScMetaV0 { ref key, .. }) => (key.clone(), entry.clone()),
-        })
-        .collect();
-
-    let new_metadata = [
-        ("target_dir", relative_target_dir),
-        ("workspace_root", relative_workspace_root),
-        ("package_manifest_path", relative_package_manifest_path),
-        ("package_name", &p.name),
-        ("project_name", &git_data.project_name),
-        ("git_url", &git_data.remote_url),
-        ("commit_hash", &git_data.commit_hash),
-        ("soroban_cli_version", env!("CARGO_PKG_VERSION")),
-    ];
-    let metadata_map = insert_new_metadata(&new_metadata, &metadata_map);
-
-    let mut cursor = Limited::new(Cursor::new(vec![]), Limits::none());
-    metadata_map
-        .iter()
-        .for_each(|(_, data)| data.write_xdr(&mut cursor).unwrap());
-    let meta_xdr = cursor.inner.into_inner();
-
-    let custom_section = CustomSection {
-        name: Cow::from("contractmetav0"),
-        data: Cow::from(meta_xdr),
-    };
-
-    let mut wasm = read_wasm_without_contractmeta(&contract_buf)?;
-    custom_section.append_to(&mut wasm);
-
-    let backup_path = target_file_path.with_extension("back.wasm");
-    fs::copy(&target_file_path, backup_path).map_err(Error::CopyingWasmFile)?;
-
-    let temp_file = format!("{}.{}.temp", target_file, rand::random::<u32>());
-    let temp_file_path = file_path.join(temp_file);
-
-    fs::write(&temp_file_path, wasm).map_err(Error::WritingWasmFile)?;
-    fs::rename(&temp_file_path, target_file_path).map_err(Error::CopyingWasmFile)?;
-
-    Ok(())
-}
-
-pub fn load_contract_metadata_from_path(wasm: &PathBuf) -> Result<ContractMetadata, Error> {
-    let metadata = read_wasm_contractmeta_file(wasm)?;
-
-    let mut contract_metadata = ContractMetadata::default();
-    metadata.iter().for_each(
-        |ScMetaEntry::ScMetaV0(data)| match data.key.to_string().as_str() {
-            "target_dir" => contract_metadata.target_dir = data.val.to_string(),
-            "workspace_root" => contract_metadata.workspace_root = data.val.to_string(),
-            "package_manifest_path" => {
-                contract_metadata.package_manifest_path = data.val.to_string()
-            }
-            "package_name" => contract_metadata.package_name = data.val.to_string(),
-            "project_name" => contract_metadata.project_name = data.val.to_string(),
-            "git_url" => contract_metadata.git_url = data.val.to_string(),
-            "commit_hash" => contract_metadata.commit_hash = data.val.to_string(),
-            "rsver" => contract_metadata.rustc = Some(data.val.to_string()),
-            "wasm_opt" => {
-                contract_metadata.is_optimized = match data.val.to_string().as_str() {
-                    "true" => true,
-                    _ => false,
-                }
-            }
-            _ => {}
-        },
-    );
-
-    Ok(contract_metadata)
-}
-
-fn insert_new_metadata(
-    data: &[(&str, &str)],
-    metadata_map: &BTreeMap<StringM, ScMetaEntry>,
-) -> BTreeMap<StringM, ScMetaEntry> {
-    let mut metadata_map = metadata_map.clone();
-
-    data.iter().for_each(|(key, val)| {
-        let key = StringM::from_str(key).expect("StringM");
-        let val = StringM::from_str(val).expect("StringM");
-
-        metadata_map.insert(key.clone(), ScMetaEntry::ScMetaV0(ScMetaV0 { key, val }));
-    });
-
-    metadata_map
+    Ok(Some(GitInfo {
+        root,
+        commit_hash,
+        clone_url,
+    }))
 }
