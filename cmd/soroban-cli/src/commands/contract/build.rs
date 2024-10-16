@@ -110,7 +110,6 @@ impl Cmd {
         }
 
         for p in packages {
-            // fixme optionall get cargo name from CARGO, write cargo_bin fn
             let cargo_bin = env::var("CARGO").unwrap_or("cargo".to_string());
             let mut cmd = Command::new(cargo_bin);
             cmd.stdout(Stdio::piped());
@@ -157,7 +156,7 @@ impl Cmd {
                     return Err(Error::Exit(status));
                 }
 
-                repro_utils::update_build_contractmeta_in_contract(
+                repro_utils::update_wasm_contractmeta_after_build(
                     &self.profile,
                     target_dir.as_str(),
                     workspace_root.as_str(),

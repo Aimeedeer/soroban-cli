@@ -85,7 +85,7 @@ impl Cmd {
             .run(&self.wasm.wasm, &wasm_out)
             .map_err(Error::OptimizationError)?;
 
-        self.update_metadata(&wasm_out)?;
+        self.update_contractmeta(&wasm_out)?;
         let wasm_out_size = wasm::len(&wasm_out)?;
         println!(
             "Optimized: {} ({} bytes)",
@@ -97,13 +97,8 @@ impl Cmd {
     }
 
     #[cfg(feature = "opt")]
-    fn update_metadata(&self, wasm_out: &std::path::PathBuf) -> Result<(), Error> {
-        let meta_entry = ScMetaEntry::ScMetaV0(ScMetaV0 {
-            key: StringM::from_str("wasm_opt").expect("StringM"),
-            val: StringM::from_str("true").expect("StringM"),
-        });
-
-        let wasm_buf = repro_utils::update_customsection_metadata(&self.wasm.wasm, meta_entry)?;
+    fn update_contractmeta(&self, wasm_out: &std::path::PathBuf) -> Result<(), Error> {
+        let wasm_buf = repro_utils::update_wasm_contractmeta(&self.wasm.wasm, "wasm_opt", "true")?;
 
         let temp_file = format!(
             "{}.{}.temp",
@@ -119,7 +114,7 @@ impl Cmd {
 
     #[cfg(feature = "opt")]
     fn is_already_optimized(&self) -> Result<bool, Error> {
-        let metadata = repro_utils::read_wasm_contractmeta_file(&self.wasm.wasm)?;
+        let metadata = repro_utils::read_wasm_contractmeta(&self.wasm.wasm.read())?;
 
         let mut is_optimized = false;
         metadata.iter().for_each(|ScMetaEntry::ScMetaV0(data)| {
