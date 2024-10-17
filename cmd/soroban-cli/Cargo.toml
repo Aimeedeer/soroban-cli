@@ -134,6 +134,7 @@ wasm-encoder = "0.202.0"
 rustc_version_runtime = "0.3.0"
 leb128 = "0.2.5"
 colored = "2.1.0"
+serde_derive = "1.0.210"
 
 [build-dependencies]
 crate-git-revision = "0.0.4"

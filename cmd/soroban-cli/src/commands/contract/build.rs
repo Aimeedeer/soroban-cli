@@ -96,10 +96,9 @@ impl Cmd {
 
         let metadata = self.metadata()?;
         let packages = self.packages(&metadata)?;
-        let workspace_root = &metadata.workspace_root;
         let target_dir = &metadata.target_directory;
 
-        let git_data = repro_utils::git_data(&metadata.workspace_root.as_str())?;
+        let git_info = repro_utils::git_info(&metadata)?;
 
         if let Some(package) = &self.package {
             if packages.is_empty() {
@@ -114,6 +113,7 @@ impl Cmd {
             let mut cmd = Command::new(cargo_bin);
             cmd.stdout(Stdio::piped());
             cmd.arg("rustc");
+            cmd.arg("--locked");
             let manifest_path = pathdiff::diff_paths(&p.manifest_path, &working_dir)
                 .unwrap_or(p.manifest_path.clone().into());
             cmd.arg(format!(
@@ -158,10 +158,9 @@ impl Cmd {
 
                 repro_utils::update_wasm_contractmeta_after_build(
                     &self.profile,
-                    target_dir.as_str(),
-                    workspace_root.as_str(),
                     &p,
-                    &git_data,
+                    &metadata,
+                    &git_info,
                 )?;
 
                 if let Some(out_dir) = &self.out_dir {

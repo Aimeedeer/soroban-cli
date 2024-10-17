@@ -14,7 +14,7 @@ use std::{
     ffi::OsStr,
     fmt::Debug,
     fs, io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, ExitStatus},
 };
 
@@ -23,12 +23,14 @@ const CONTRACT_REPRO_PATH: &str = "contract-repro";
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
+    Metadata(#[from] cargo_metadata::Error),
+    #[error(transparent)]
     CargoCmd(io::Error),
     #[error(transparent)]
     RustupCmd(io::Error),
     #[error(transparent)]
     GitCmd(io::Error),
-    #[error("Exited with status code: {code}")]
+    #[error("Exited with status code: {code}.")]
     GitCmdStatus { code: i32 },
     #[error("Process terminated by signal: {git_cmd}.")]
     GitCmdTerminated { git_cmd: String },
@@ -52,8 +54,6 @@ pub enum Error {
     GitUrlNotProvided,
     #[error("Invalid git URL {url}.")]
     InvalidGitUrl { url: String },
-    #[error("Project {name} not found in path {path}.")]
-    ProjectNotFound { name: String, path: String },
     #[error(transparent)]
     Rpc(#[from] rpc::Error),
     #[error(transparent)]
@@ -78,18 +78,20 @@ pub enum Error {
     BytesDiff { bytes_diff: u32 },
     #[error(transparent)]
     ReadingUserInput(io::Error),
+    #[error("Package {name} not found.")]
+    PackageNotFound { name: String },
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Cmd {
-    #[command(subcommand)]
-    wasm_src: CmdWasmSrc,
     /// Building without `--locked`
     #[arg(long, default_value_t = false)]
     build_w_o_locked: bool,
-    /// Path to the source code
+    /// Path to Cargo.toml
     #[arg(long)]
-    repo: Option<String>,
+    package_manifest_path: Option<PathBuf>,
+    #[command(subcommand)]
+    wasm_src: CmdWasmSrc,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -171,80 +173,44 @@ impl Cmd {
             return Err(Error::RustcNotFound);
         }
 
-        let wasm = wasm::Args { wasm: wasm_path };
+        let wasm = wasm::Args {
+            wasm: wasm_path.clone(),
+        };
 
-        let work_dir_name = format!("{}-{}", &repro_meta.repo_name, wasm.hash()?);
-
-        let work_dir = repro_dir.join(work_dir_name);
-        let mut git_dir = work_dir.join(&repro_meta.repo_name);
-
-        if let Some(repo_dir) = &self.repo {
-            // fixme reexamine this logic
-            if !repo_dir.contains(&repro_meta.repo_name) {
-                return Err(Error::ProjectNotFound {
-                    name: repro_meta.repo_name,
-                    path: repo_dir.to_string(),
-                });
-            }
-            if let Some(dir) = repo_dir.split(&repro_meta.repo_name).next() {
-                git_dir = Path::new(&dir).join(&repro_meta.repo_name);
-            }
+        let package_manifest_path = if let Some(path) = &self.package_manifest_path {
+            path
         } else {
-            if repro_meta.git_url.is_empty() {
-                return Err(Error::GitUrlNotProvided);
-            }
+            let work_dir_name = if let Some(file_name) = wasm_path.file_name() {
+                format!("{}-{}", file_name.to_string_lossy(), wasm.hash()?)
+            } else {
+                format!("{}", wasm.hash()?)
+            };
 
-            if !validate_git_url(&repro_meta.git_url) {
-                return Err(Error::InvalidGitUrl {
-                    url: repro_meta.git_url.to_string(),
-                });
-            }
+            let git_dir = repro_dir.join(work_dir_name);
+            clone_git_repo(&repro_meta, &git_dir)?;
 
-            let mut git_cmd = Command::new("git");
-            git_cmd.args(["clone", &repro_meta.git_url, &git_dir.to_string_lossy()]);
-            let git_cmd_str = format!(
-                "{}",
-                &git_cmd.get_args().map(OsStr::to_string_lossy).join(" ")
-            );
+            let mut cmd = cargo_metadata::MetadataCommand::new();
+            cmd.current_dir(&git_dir);
+            cmd.no_deps();
+            let cargo_metadata = cmd.exec()?;
 
-            let status = git_cmd.status().map_err(Error::GitCmd)?;
-            if !status.success() {
-                match status.code() {
-                    Some(code) => {
-                        if code != 128 {
-                            return Err(Error::GitCmdStatus { code });
-                        }
-                    }
-                    None => {
-                        return Err(Error::GitCmdTerminated {
-                            git_cmd: git_cmd_str.to_string(),
-                        })
-                    }
-                }
-            }
-        }
+            println!("cargo cmd: {:#?}", &cmd);
+            println!("repro_meta: {:#?}", repro_meta);
+            println!("cargo_metadata: {:#?}", cargo_metadata);
+            let package = cargo_metadata
+                .packages
+                .iter()
+                .find(|p| p.name == repro_meta.package_name);
 
-        let package_manifest_path = git_dir.join(&repro_meta.package_manifest_path);
-
-        let mut git_cmd = Command::new("git");
-        git_cmd.current_dir(&git_dir);
-        git_cmd.args(["checkout", &repro_meta.commit_hash]);
-        let git_cmd_str = format!(
-            "{}",
-            &git_cmd.get_args().map(OsStr::to_string_lossy).join(" ")
-        );
-
-        let status = git_cmd.status().map_err(Error::GitCmd)?;
-        if !status.success() {
-            match status.code() {
-                Some(code) => return Err(Error::GitCmdStatus { code }),
+            &match package {
+                Some(package) => PathBuf::from(package.manifest_path.clone()),
                 None => {
-                    return Err(Error::GitCmdTerminated {
-                        git_cmd: git_cmd_str.to_string(),
+                    return Err(Error::PackageNotFound {
+                        name: repro_meta.package_name.to_string(),
                     })
                 }
             }
-        }
+        };
 
         if let Some(rustc) = &repro_meta.rustc {
             let mut rustup_cmd = Command::new("rustup");
@@ -352,6 +318,63 @@ fn validate_git_url(git_url: &str) -> bool {
     re.is_match(git_url)
 }
 
+fn clone_git_repo(repro_meta: &repro_utils::ReproMeta, git_dir: &PathBuf) -> Result<(), Error> {
+    if repro_meta.git_url.is_empty() {
+        return Err(Error::GitUrlNotProvided);
+    }
+
+    if !validate_git_url(&repro_meta.git_url) {
+        return Err(Error::InvalidGitUrl {
+            url: repro_meta.git_url.clone(),
+        });
+    }
+
+    let mut git_cmd = Command::new("git");
+    git_cmd.args(["clone", &repro_meta.git_url, &git_dir.to_string_lossy()]);
+    let git_cmd_str = format!(
+        "{}",
+        &git_cmd.get_args().map(OsStr::to_string_lossy).join(" ")
+    );
+
+    let status = git_cmd.status().map_err(Error::GitCmd)?;
+    if !status.success() {
+        match status.code() {
+            Some(code) => {
+                if code != 128 {
+                    return Err(Error::GitCmdStatus { code });
+                }
+            }
+            None => {
+                return Err(Error::GitCmdTerminated {
+                    git_cmd: git_cmd_str.to_string(),
+                })
+            }
+        }
+    }
+
+    let mut git_cmd = Command::new("git");
+    git_cmd.current_dir(&git_dir);
+    git_cmd.args(["checkout", &repro_meta.commit_hash]);
+    let git_cmd_str = format!(
+        "{}",
+        &git_cmd.get_args().map(OsStr::to_string_lossy).join(" ")
+    );
+
+    let status = git_cmd.status().map_err(Error::GitCmd)?;
+    if !status.success() {
+        match status.code() {
+            Some(code) => return Err(Error::GitCmdStatus { code }),
+            None => {
+                return Err(Error::GitCmdTerminated {
+                    git_cmd: git_cmd_str.to_string(),
+                })
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl NetworkRunnable for Cmd {
     type Error = Error;
@@ -365,8 +388,8 @@ impl NetworkRunnable for Cmd {
         match &self.wasm_src {
             CmdWasmSrc::Contract(wasm) => {
                 let config = config.unwrap_or(&wasm.config);
-                let network = config.get_network().map_err(Error::Config)?;
-                let client = Client::new(&network.rpc_url).map_err(Error::Rpc)?;
+                let network = config.get_network()?;
+                let client = Client::new(&network.rpc_url)?;
                 client
                     .verify_network_passphrase(Some(&network.network_passphrase))
                     .await?;
@@ -384,8 +407,8 @@ impl NetworkRunnable for Cmd {
             }
             CmdWasmSrc::WasmHash(wasm) => {
                 let config = config.unwrap_or(&wasm.config);
-                let network = config.get_network().map_err(Error::Config)?;
-                let client = Client::new(&network.rpc_url).map_err(Error::Rpc)?;
+                let network = config.get_network()?;
+                let client = Client::new(&network.rpc_url)?;
                 client
                     .verify_network_passphrase(Some(&network.network_passphrase))
                     .await?;

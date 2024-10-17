@@ -15,12 +15,12 @@ use wasmparser::{Parser as WasmParser, Payload};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("reading file {filepath}: {error}")]
+    #[error("Reading file {filepath}: {error}")]
     CannotReadContractFile {
         filepath: std::path::PathBuf,
         error: io::Error,
     },
-    #[error("xdr processing error: {0}")]
+    #[error("Xdr processing error: {0}")]
     Xdr(#[from] xdr::Error),
     #[error(transparent)]
     Parser(#[from] wasmparser::BinaryReaderError),
@@ -28,22 +28,24 @@ pub enum Error {
     GitCmd(io::Error),
     #[error(transparent)]
     Utf8(std::str::Utf8Error),
-    #[error("writing wasm file: {0}")]
+    #[error("Writing wasm file: {0}")]
     WritingWasmFile(io::Error),
-    #[error("copying wasm file: {0}")]
+    #[error("Copying wasm file: {0}")]
     CopyingWasmFile(io::Error),
+    #[error("Failed fetching Git repository. Exited with status code: {code}.")]
+    FetchingGitRepo { code: u16 },
+    #[error("Failed fetching Git information. Exited with status code: {code}.")]
+    FetchingGitInfo { code: i32 },
+    #[error(transparent)]
+    ParsingGitRepo(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Default)]
 pub struct ReproMeta {
-    pub rustc: Option<String>,
-    pub target_dir: String,
-    pub workspace_root: String,
-    pub package_manifest_path: String,
     pub package_name: String,
-    pub repo_name: String,
     pub git_url: String,
     pub commit_hash: String,
+    pub rustc: Option<String>,
     pub is_optimized: bool,
 }
 
@@ -116,11 +118,7 @@ pub fn read_wasm_reprometa(wasm: &PathBuf) -> Result<ReproMeta, Error> {
         .iter()
         .for_each(
             |ScMetaEntry::ScMetaV0(data)| match data.key.to_string().as_str() {
-                "target_dir" => repro_meta.target_dir = data.val.to_string(),
-                "workspace_root" => repro_meta.workspace_root = data.val.to_string(),
-                "package_manifest_path" => repro_meta.package_manifest_path = data.val.to_string(),
                 "package_name" => repro_meta.package_name = data.val.to_string(),
-                "repo_name" => repro_meta.repo_name = data.val.to_string(),
                 "git_url" => repro_meta.git_url = data.val.to_string(),
                 "commit_hash" => repro_meta.commit_hash = data.val.to_string(),
                 "rsver" => repro_meta.rustc = Some(data.val.to_string()),
@@ -150,26 +148,38 @@ pub fn update_wasm_contractmeta(
 
 pub fn update_wasm_contractmeta_after_build(
     profile: &str,
-    target_dir: &str,
-    workspace_root: &str,
     p: &Package,
-    git_data: &GitData,
+    cargo_metadata: &cargo_metadata::Metadata,
+    git_info: &Option<GitInfo>,
 ) -> Result<(), Error> {
-    // fixme this logic won't work if the directory doesn't have the same name as the github repo
-    let mut v: Vec<&str> = target_dir.split(&git_data.repo_name).collect();
-    v.reverse();
-    let relative_target_dir = v[0].trim_start_matches("/");
+    let mut git_url = "";
+    let mut commit_hash = "";
+    if let Some(git_info) = git_info {
+        git_url = &git_info.clone_url;
+        commit_hash = &git_info.commit_hash;
+    } else {
+        eprintln!(
+            "{}",
+            format!(
+                "Warning: Package {} doesn't have git information. Build will not be reproducible.",
+                &p.name
+            )
+            .yellow()
+            .bold()
+        );
+    }
 
-    let mut v: Vec<&str> = workspace_root.split(&git_data.repo_name).collect();
-    v.reverse();
-    let relative_workspace_root = v[0].trim_start_matches("/");
+    let metadata = [
+        ("package_name", p.name.as_str()),
+        ("git_url", git_url),
+        ("commit_hash", commit_hash),
+        (
+            "soroban_cli_version",
+            &format!("{}", env!("CARGO_PKG_VERSION")),
+        ),
+    ];
 
-    let manifest_path_str = p.manifest_path.as_str();
-    let mut v: Vec<&str> = manifest_path_str.split(&git_data.repo_name).collect();
-    v.reverse();
-    let relative_package_manifest_path = v[0].trim_start_matches("/");
-
-    let file_path = Path::new(target_dir)
+    let file_path = Path::new(&cargo_metadata.target_directory)
         .join("wasm32-unknown-unknown")
         .join(profile);
 
@@ -177,20 +187,10 @@ pub fn update_wasm_contractmeta_after_build(
     let target_file_path = file_path.join(&target_file);
 
     let wasm_buf = read_wasm(&target_file_path)?;
-    let metadata = [
-        ("target_dir", relative_target_dir),
-        ("workspace_root", relative_workspace_root),
-        ("package_manifest_path", relative_package_manifest_path),
-        ("package_name", &p.name),
-        ("repo_name", &git_data.repo_name),
-        ("git_url", &git_data.remote_url),
-        ("commit_hash", &git_data.commit_hash),
-        ("soroban_cli_version", env!("CARGO_PKG_VERSION")),
-    ];
     let wasm = insert_metadata(&metadata, &wasm_buf)?;
 
-    let backup_path = target_file_path.with_extension("back.wasm");
-    fs::copy(&target_file_path, backup_path).map_err(Error::CopyingWasmFile)?;
+    let backup_file_path = target_file_path.with_extension("backup.wasm");
+    fs::copy(&target_file_path, backup_file_path).map_err(Error::CopyingWasmFile)?;
 
     let temp_file = format!("{}.{}.temp", target_file, rand::random::<u32>());
     let temp_file_path = file_path.join(temp_file);
@@ -198,19 +198,17 @@ pub fn update_wasm_contractmeta_after_build(
     fs::write(&temp_file_path, wasm).map_err(Error::WritingWasmFile)?;
     fs::rename(&temp_file_path, &target_file_path).map_err(Error::CopyingWasmFile)?;
 
-    // fixme move to build.rs?
     let repro_meta = read_wasm_reprometa(&target_file_path)?;
     if let Some(ref rustc) = repro_meta.rustc {
         if rustc.contains("nightly") {
             eprintln!(
                 "{}",
                 "Warning: Building with rust nightly. Build will not be reproducible."
-                    .red()
+                    .yellow()
                     .bold()
             );
         }
     }
-
     Ok(())
 }
 
@@ -245,56 +243,6 @@ fn insert_metadata(metadata: &[(&str, &str)], wasm_buf: &[u8]) -> Result<Vec<u8>
     Ok(wasm)
 }
 
-#[derive(Debug, Default)]
-pub struct GitData {
-    pub commit_hash: String,
-    pub remote_url: String,
-    pub repo_name: String,
-}
-
-// fixme this is all very fragile
-pub fn git_data(workspace_root: &str) -> Result<GitData, Error> {
-    let mut git_data = GitData::default();
-
-    let mut git_cmd = Command::new("git");
-    git_cmd.current_dir(workspace_root);
-    git_cmd.args(["rev-parse", "HEAD"]);
-    let output = git_cmd.output().map_err(Error::GitCmd)?;
-    git_data.commit_hash = str::from_utf8(&output.stdout)
-        .map_err(Error::Utf8)?
-        .trim()
-        .to_string();
-
-    let remote_name = "origin";
-
-    let mut git_cmd = Command::new("git");
-    git_cmd.current_dir(workspace_root);
-    git_cmd.args(["remote", "get-url", &remote_name]);
-    let output = git_cmd.output().map_err(Error::GitCmd)?;
-    let mut url = str::from_utf8(&output.stdout)
-        .map_err(Error::Utf8)?
-        .trim()
-        .to_string();
-
-    if url.starts_with("git@github.com:") {
-        url = url.replace("git@github.com:", "https://github.com/");
-    }
-    git_data.remote_url = url;
-
-    let mut tmp_str = git_data
-        .remote_url
-        .trim_start_matches("https://github.com/");
-    tmp_str = tmp_str.trim_end_matches(".git");
-    git_data.repo_name = tmp_str
-        .split("/")
-        .skip(1)
-        .next()
-        .expect("Project name")
-        .to_string();
-
-    Ok(git_data)
-}
-
 fn calc_section_header_size(range: &std::ops::Range<usize>) -> usize {
     let len = range.end - range.start;
     let mut buf = Vec::new();
@@ -302,4 +250,52 @@ fn calc_section_header_size(range: &std::ops::Range<usize>) -> usize {
     let int_enc_size = int_enc_size.expect("leb128 write");
     let section_id_byte = 1;
     int_enc_size + section_id_byte
+}
+
+#[derive(Debug, Default)]
+pub struct GitInfo {
+    pub clone_url: String,
+    pub commit_hash: String,
+}
+
+// fixme this is all very fragile
+pub fn git_info(cargo_metadata: &cargo_metadata::Metadata) -> Result<Option<GitInfo>, Error> {
+    let mut git_cmd = Command::new("git");
+    git_cmd.current_dir(&cargo_metadata.workspace_root);
+    git_cmd.args(["rev-parse", "HEAD"]);
+    let output = git_cmd.output().map_err(Error::GitCmd)?;
+
+    if !output.status.success() {
+        if let Some(code) = output.status.code() {
+            let err = str::from_utf8(&output.stderr).map_err(Error::Utf8)?;
+            if err.contains("not a git repository") {
+                eprintln!("{}", err);
+            } else {
+                return Err(Error::FetchingGitInfo { code });
+            }
+        }
+    }
+    let commit_hash = str::from_utf8(&output.stdout)
+        .map_err(Error::Utf8)?
+        .trim()
+        .to_string();
+
+    let remote_name = "origin";
+    let mut git_cmd = Command::new("git");
+    git_cmd.current_dir(&cargo_metadata.workspace_root);
+    git_cmd.args(["remote", "get-url", &remote_name]);
+    let output = git_cmd.output().map_err(Error::GitCmd)?;
+    let mut clone_url = str::from_utf8(&output.stdout)
+        .map_err(Error::Utf8)?
+        .trim()
+        .to_string();
+
+    if clone_url.starts_with("git@github.com:") {
+        clone_url = clone_url.replace("git@github.com:", "https://github.com/");
+    }
+
+    Ok(Some(GitInfo {
+        commit_hash,
+        clone_url,
+    }))
 }
