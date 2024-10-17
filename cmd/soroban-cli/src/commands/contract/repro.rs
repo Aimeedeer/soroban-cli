@@ -173,21 +173,21 @@ impl Cmd {
 
         let wasm = wasm::Args { wasm: wasm_path };
 
-        let work_dir_name = format!("{}-{}", &repro_meta.project_name, wasm.hash()?);
+        let work_dir_name = format!("{}-{}", &repro_meta.repo_name, wasm.hash()?);
 
         let work_dir = repro_dir.join(work_dir_name);
-        let mut git_dir = work_dir.join(&repro_meta.project_name);
+        let mut git_dir = work_dir.join(&repro_meta.repo_name);
 
         if let Some(repo_dir) = &self.repo {
             // fixme reexamine this logic
-            if !repo_dir.contains(&repro_meta.project_name) {
+            if !repo_dir.contains(&repro_meta.repo_name) {
                 return Err(Error::ProjectNotFound {
-                    name: repro_meta.project_name,
+                    name: repro_meta.repo_name,
                     path: repo_dir.to_string(),
                 });
             }
-            if let Some(dir) = repo_dir.split(&repro_meta.project_name).next() {
-                git_dir = Path::new(&dir).join(&repro_meta.project_name);
+            if let Some(dir) = repo_dir.split(&repro_meta.repo_name).next() {
+                git_dir = Path::new(&dir).join(&repro_meta.repo_name);
             }
         } else {
             if repro_meta.git_url.is_empty() {

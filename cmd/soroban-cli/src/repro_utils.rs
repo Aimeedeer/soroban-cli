@@ -41,7 +41,7 @@ pub struct ReproMeta {
     pub workspace_root: String,
     pub package_manifest_path: String,
     pub package_name: String,
-    pub project_name: String,
+    pub repo_name: String,
     pub git_url: String,
     pub commit_hash: String,
     pub is_optimized: bool,
@@ -120,7 +120,7 @@ pub fn read_wasm_reprometa(wasm: &PathBuf) -> Result<ReproMeta, Error> {
                 "workspace_root" => repro_meta.workspace_root = data.val.to_string(),
                 "package_manifest_path" => repro_meta.package_manifest_path = data.val.to_string(),
                 "package_name" => repro_meta.package_name = data.val.to_string(),
-                "project_name" => repro_meta.project_name = data.val.to_string(),
+                "repo_name" => repro_meta.repo_name = data.val.to_string(),
                 "git_url" => repro_meta.git_url = data.val.to_string(),
                 "commit_hash" => repro_meta.commit_hash = data.val.to_string(),
                 "rsver" => repro_meta.rustc = Some(data.val.to_string()),
@@ -156,16 +156,16 @@ pub fn update_wasm_contractmeta_after_build(
     git_data: &GitData,
 ) -> Result<(), Error> {
     // fixme this logic won't work if the directory doesn't have the same name as the github repo
-    let mut v: Vec<&str> = target_dir.split(&git_data.project_name).collect();
+    let mut v: Vec<&str> = target_dir.split(&git_data.repo_name).collect();
     v.reverse();
     let relative_target_dir = v[0].trim_start_matches("/");
 
-    let mut v: Vec<&str> = workspace_root.split(&git_data.project_name).collect();
+    let mut v: Vec<&str> = workspace_root.split(&git_data.repo_name).collect();
     v.reverse();
     let relative_workspace_root = v[0].trim_start_matches("/");
 
     let manifest_path_str = p.manifest_path.as_str();
-    let mut v: Vec<&str> = manifest_path_str.split(&git_data.project_name).collect();
+    let mut v: Vec<&str> = manifest_path_str.split(&git_data.repo_name).collect();
     v.reverse();
     let relative_package_manifest_path = v[0].trim_start_matches("/");
 
@@ -182,7 +182,7 @@ pub fn update_wasm_contractmeta_after_build(
         ("workspace_root", relative_workspace_root),
         ("package_manifest_path", relative_package_manifest_path),
         ("package_name", &p.name),
-        ("project_name", &git_data.project_name),
+        ("repo_name", &git_data.repo_name),
         ("git_url", &git_data.remote_url),
         ("commit_hash", &git_data.commit_hash),
         ("soroban_cli_version", env!("CARGO_PKG_VERSION")),
@@ -249,8 +249,7 @@ fn insert_metadata(metadata: &[(&str, &str)], wasm_buf: &[u8]) -> Result<Vec<u8>
 pub struct GitData {
     pub commit_hash: String,
     pub remote_url: String,
-    // fixme project_name is probably not the right name for this
-    pub project_name: String,
+    pub repo_name: String,
 }
 
 // fixme this is all very fragile
@@ -286,7 +285,7 @@ pub fn git_data(workspace_root: &str) -> Result<GitData, Error> {
         .remote_url
         .trim_start_matches("https://github.com/");
     tmp_str = tmp_str.trim_end_matches(".git");
-    git_data.project_name = tmp_str
+    git_data.repo_name = tmp_str
         .split("/")
         .skip(1)
         .next()
