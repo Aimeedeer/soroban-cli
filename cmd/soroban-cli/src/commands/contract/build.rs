@@ -1,4 +1,5 @@
 use clap::Parser;
+use colored::*;
 use itertools::Itertools;
 use std::{
     collections::HashSet,
@@ -64,6 +65,9 @@ pub struct Cmd {
     /// Print commands to build without executing them
     #[arg(long, conflicts_with = "out_dir", help_heading = "Other")]
     pub print_commands_only: bool,
+    /// Build with `--locked`
+    #[arg(long)]
+    pub locked: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -88,10 +92,25 @@ pub enum Error {
     CargoHome(io::Error),
     #[error(transparent)]
     Repro(#[from] repro_utils::Error),
+    #[error(transparent)]
+    ReadingUserInput(io::Error),
 }
 
 impl Cmd {
     pub fn run(&self) -> Result<(), Error> {
+        if !self.locked {
+            eprintln!(
+                "{}",
+                "Warning: Building without `--locked`. Build will not be reproducible. Press any key to continue..."
+                    .red()
+                    .bold()
+            );
+            let mut input = String::new();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(Error::ReadingUserInput)?;
+        }
+
         let working_dir = env::current_dir().map_err(Error::GettingCurrentDir)?;
 
         let metadata = self.metadata()?;
@@ -113,7 +132,6 @@ impl Cmd {
             let mut cmd = Command::new(cargo_bin);
             cmd.stdout(Stdio::piped());
             cmd.arg("rustc");
-            cmd.arg("--locked");
             let manifest_path = pathdiff::diff_paths(&p.manifest_path, &working_dir)
                 .unwrap_or(p.manifest_path.clone().into());
             cmd.arg(format!(
@@ -132,6 +150,9 @@ impl Cmd {
             }
             if self.no_default_features {
                 cmd.arg("--no-default-features");
+            }
+            if self.locked {
+                cmd.arg("--locked");
             }
             if let Some(features) = self.features() {
                 let requested: HashSet<String> = features.iter().cloned().collect();

@@ -50,10 +50,12 @@ pub enum Error {
     Utf8(std::str::Utf8Error),
     #[error(transparent)]
     Repro(#[from] repro_utils::Error),
-    #[error("Git URL is not provided.")]
-    GitUrlNotProvided,
+    #[error("Git URL not found.")]
+    GitUrlNotFound,
     #[error("Invalid git URL {url}.")]
     InvalidGitUrl { url: String },
+    #[error("Git commit hash is not found.")]
+    GitCommitHashNotFound,
     #[error(transparent)]
     Rpc(#[from] rpc::Error),
     #[error(transparent)]
@@ -76,17 +78,15 @@ pub enum Error {
     SizeDiff { size_diff: u32 },
     #[error("Reproduced WASM file is different from the original! Bytes diff: {bytes_diff}.")]
     BytesDiff { bytes_diff: u32 },
-    #[error(transparent)]
-    ReadingUserInput(io::Error),
     #[error("Package {name} not found.")]
     PackageNotFound { name: String },
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Cmd {
-    /// Building without `--locked`
-    #[arg(long, default_value_t = false)]
-    build_w_o_locked: bool,
+    /// Build with `--locked`
+    #[arg(long)]
+    locked: bool,
     /// Path to Cargo.toml
     #[arg(long)]
     package_manifest_path: Option<PathBuf>,
@@ -128,20 +128,6 @@ pub struct CmdWasmPath {
 
 impl Cmd {
     pub async fn run(&self) -> Result<(), Error> {
-        if self.build_w_o_locked {
-            eprintln!(
-                "{}",
-                "Warning: Building without `--locked`. Build will not be reproducible."
-                    .red()
-                    .bold()
-            );
-
-            let mut input = String::new();
-            io::stdin()
-                .read_line(&mut input)
-                .map_err(Error::ReadingUserInput)?;
-        }
-
         let current_dir = std::env::current_dir().map_err(Error::CurrentDir)?;
         let repro_dir = current_dir.join(CONTRACT_REPRO_PATH);
         fs::create_dir_all(&repro_dir).map_err(Error::CreatingDirectory)?;
@@ -189,27 +175,13 @@ impl Cmd {
             let git_dir = repro_dir.join(work_dir_name);
             clone_git_repo(&repro_meta, &git_dir)?;
 
-            let mut cmd = cargo_metadata::MetadataCommand::new();
-            cmd.current_dir(&git_dir);
-            cmd.no_deps();
-            let cargo_metadata = cmd.exec()?;
-
-            println!("cargo cmd: {:#?}", &cmd);
-            println!("repro_meta: {:#?}", repro_meta);
-            println!("cargo_metadata: {:#?}", cargo_metadata);
-            let package = cargo_metadata
-                .packages
-                .iter()
-                .find(|p| p.name == repro_meta.package_name);
-
-            &match package {
-                Some(package) => PathBuf::from(package.manifest_path.clone()),
-                None => {
-                    return Err(Error::PackageNotFound {
-                        name: repro_meta.package_name.to_string(),
-                    })
-                }
+            if repro_meta.relative_manifest_path.is_empty() {
+                return Err(Error::PackageNotFound {
+                    name: repro_meta.package_name.to_string(),
+                });
             }
+
+            &git_dir.join(&repro_meta.relative_manifest_path)
         };
 
         if let Some(rustc) = &repro_meta.rustc {
@@ -242,7 +214,7 @@ impl Cmd {
             "--out-dir",
             &repro_dir.to_string_lossy(),
         ]);
-        if !self.build_w_o_locked {
+        if self.locked {
             soroban_cmd.arg("--locked");
         }
 
@@ -311,22 +283,22 @@ impl Cmd {
 }
 
 fn validate_git_url(git_url: &str) -> bool {
-    let re = Regex::new(
-        r"^(https:\/\/(\w+@)?|git@)[\w.-]+(\.[\w.-]+)+(\/|:)[\w._-]+\/[\w._-]+(\.git)?$",
-    )
-    .unwrap();
+    let re = Regex::new(r"^(https:\/\/github\.com\/[\w.-]+\/[\w.-]+\.git)$").unwrap();
     re.is_match(git_url)
 }
 
 fn clone_git_repo(repro_meta: &repro_utils::ReproMeta, git_dir: &PathBuf) -> Result<(), Error> {
     if repro_meta.git_url.is_empty() {
-        return Err(Error::GitUrlNotProvided);
+        return Err(Error::GitUrlNotFound);
     }
 
     if !validate_git_url(&repro_meta.git_url) {
         return Err(Error::InvalidGitUrl {
             url: repro_meta.git_url.clone(),
         });
+    }
+    if repro_meta.commit_hash.is_empty() {
+        return Err(Error::GitCommitHashNotFound);
     }
 
     let mut git_cmd = Command::new("git");

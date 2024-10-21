@@ -43,6 +43,7 @@ pub enum Error {
 #[derive(Debug, Default)]
 pub struct ReproMeta {
     pub package_name: String,
+    pub relative_manifest_path: String,
     pub git_url: String,
     pub commit_hash: String,
     pub rustc: Option<String>,
@@ -119,6 +120,9 @@ pub fn read_wasm_reprometa(wasm: &PathBuf) -> Result<ReproMeta, Error> {
         .for_each(
             |ScMetaEntry::ScMetaV0(data)| match data.key.to_string().as_str() {
                 "package_name" => repro_meta.package_name = data.val.to_string(),
+                "relative_manifest_path" => {
+                    repro_meta.relative_manifest_path = data.val.to_string()
+                }
                 "git_url" => repro_meta.git_url = data.val.to_string(),
                 "commit_hash" => repro_meta.commit_hash = data.val.to_string(),
                 "rsver" => repro_meta.rustc = Some(data.val.to_string()),
@@ -152,12 +156,7 @@ pub fn update_wasm_contractmeta_after_build(
     cargo_metadata: &cargo_metadata::Metadata,
     git_info: &Option<GitInfo>,
 ) -> Result<(), Error> {
-    let mut git_url = "";
-    let mut commit_hash = "";
-    if let Some(git_info) = git_info {
-        git_url = &git_info.clone_url;
-        commit_hash = &git_info.commit_hash;
-    } else {
+    if git_info.is_none() {
         eprintln!(
             "{}",
             format!(
@@ -169,10 +168,22 @@ pub fn update_wasm_contractmeta_after_build(
         );
     }
 
+    let git_info = if let Some(info) = git_info {
+        info
+    } else {
+        &GitInfo::default()
+    };
+
+    let relative_manifest_path = pathdiff::diff_paths(&p.manifest_path, &git_info.root)
+        .unwrap_or(p.manifest_path.clone().into());
     let metadata = [
         ("package_name", p.name.as_str()),
-        ("git_url", git_url),
-        ("commit_hash", commit_hash),
+        (
+            "relative_manifest_path",
+            &relative_manifest_path.to_string_lossy(),
+        ),
+        ("git_url", &git_info.clone_url),
+        ("commit_hash", &git_info.commit_hash),
         (
             "soroban_cli_version",
             &format!("{}", env!("CARGO_PKG_VERSION")),
@@ -182,7 +193,6 @@ pub fn update_wasm_contractmeta_after_build(
     let file_path = Path::new(&cargo_metadata.target_directory)
         .join("wasm32-unknown-unknown")
         .join(profile);
-
     let target_file = format!("{}.wasm", p.name.replace('-', "_"));
     let target_file_path = file_path.join(&target_file);
 
@@ -254,25 +264,43 @@ fn calc_section_header_size(range: &std::ops::Range<usize>) -> usize {
 
 #[derive(Debug, Default)]
 pub struct GitInfo {
+    pub root: String,
     pub clone_url: String,
     pub commit_hash: String,
 }
 
 // fixme this is all very fragile
 pub fn git_info(cargo_metadata: &cargo_metadata::Metadata) -> Result<Option<GitInfo>, Error> {
+    // Git root
+    let mut git_cmd = Command::new("git");
+    git_cmd.current_dir(&cargo_metadata.workspace_root);
+    git_cmd.args(["rev-parse", "--show-toplevel"]);
+    let output = git_cmd.output().map_err(Error::GitCmd)?;
+    if !output.status.success() {
+        if let Some(code) = output.status.code() {
+            let err = str::from_utf8(&output.stderr).map_err(Error::Utf8)?;
+	    // If it's not git repository, return empty GitInfo
+            if err.contains("not a git repository") {
+                eprintln!("{}", err);
+                return Ok(None);
+            } else {
+                return Err(Error::FetchingGitInfo { code });
+            }
+        }
+    }
+    let root = str::from_utf8(&output.stdout)
+        .map_err(Error::Utf8)?
+        .trim()
+        .to_string();
+
+    // Git commit hash
     let mut git_cmd = Command::new("git");
     git_cmd.current_dir(&cargo_metadata.workspace_root);
     git_cmd.args(["rev-parse", "HEAD"]);
     let output = git_cmd.output().map_err(Error::GitCmd)?;
-
     if !output.status.success() {
         if let Some(code) = output.status.code() {
-            let err = str::from_utf8(&output.stderr).map_err(Error::Utf8)?;
-            if err.contains("not a git repository") {
-                eprintln!("{}", err);
-            } else {
-                return Err(Error::FetchingGitInfo { code });
-            }
+            return Err(Error::FetchingGitInfo { code });
         }
     }
     let commit_hash = str::from_utf8(&output.stdout)
@@ -280,11 +308,17 @@ pub fn git_info(cargo_metadata: &cargo_metadata::Metadata) -> Result<Option<GitI
         .trim()
         .to_string();
 
+    // Git remote url
     let remote_name = "origin";
     let mut git_cmd = Command::new("git");
     git_cmd.current_dir(&cargo_metadata.workspace_root);
     git_cmd.args(["remote", "get-url", &remote_name]);
     let output = git_cmd.output().map_err(Error::GitCmd)?;
+    if !output.status.success() {
+        if let Some(code) = output.status.code() {
+            return Err(Error::FetchingGitInfo { code });
+        }
+    }
     let mut clone_url = str::from_utf8(&output.stdout)
         .map_err(Error::Utf8)?
         .trim()
@@ -295,6 +329,7 @@ pub fn git_info(cargo_metadata: &cargo_metadata::Metadata) -> Result<Option<GitI
     }
 
     Ok(Some(GitInfo {
+        root,
         commit_hash,
         clone_url,
     }))
