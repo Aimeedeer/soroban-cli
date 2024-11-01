@@ -1,3 +1,4 @@
+use crate::xdr::Hash;
 use crate::{
     commands::{global, NetworkRunnable},
     config::{self, locator},
@@ -7,7 +8,6 @@ use crate::{
 };
 use clap::{Parser, Subcommand};
 use colored::*;
-use crate::xdr::Hash;
 use itertools::Itertools;
 use regex::Regex;
 use std::{

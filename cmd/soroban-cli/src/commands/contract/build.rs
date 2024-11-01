@@ -220,7 +220,7 @@ impl Cmd {
                     fs::copy(target_file_path, out_file_path).map_err(Error::CopyingWasmFile)?;
                 }
             }
-	}
+        }
         Ok(())
     }
 

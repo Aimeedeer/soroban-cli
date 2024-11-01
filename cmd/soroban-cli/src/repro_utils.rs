@@ -1,5 +1,5 @@
-use cargo_metadata::Package;
 use crate::xdr::{self, ReadXdr};
+use cargo_metadata::Package;
 use colored::*;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -279,7 +279,7 @@ pub fn git_info(cargo_metadata: &cargo_metadata::Metadata) -> Result<Option<GitI
     if !output.status.success() {
         if let Some(code) = output.status.code() {
             let err = str::from_utf8(&output.stderr).map_err(Error::Utf8)?;
-	    // If it's not git repository, return empty GitInfo
+            // If it's not git repository, return empty GitInfo
             if err.contains("not a git repository") {
                 eprintln!("{}", err);
                 return Ok(None);
