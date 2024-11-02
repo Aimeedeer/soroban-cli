@@ -1,15 +1,15 @@
 use crate::xdr::Hash;
 use crate::{
     commands::{global, NetworkRunnable},
-    config::{self, locator},
-    repro_utils,
-    rpc::{self, Client},
-    utils, wasm,
+    config, repro_utils, rpc,
+    utils::rpc::get_remote_wasm_from_hash,
+    wasm,
 };
 use clap::{Parser, Subcommand};
 use colored::*;
 use itertools::Itertools;
 use regex::Regex;
+use std::str::FromStr;
 use std::{
     ffi::OsStr,
     fmt::Debug,
@@ -60,16 +60,6 @@ pub enum Error {
     Rpc(#[from] rpc::Error),
     #[error(transparent)]
     Config(#[from] config::Error),
-    #[error("Cannot parse contract ID {contract_id}: {error}.")]
-    CannotParseContractId {
-        contract_id: String,
-        error: locator::Error,
-    },
-    #[error("Cannot parse WASM hash {wasm_hash}: {error}.")]
-    CannotParseWasmHash {
-        wasm_hash: String,
-        error: stellar_strkey::DecodeError,
-    },
     #[error("WASM build with unsupported nightly WASM toolchain. Not reproducible.")]
     Nightly,
     #[error("Rustc not found in the contract's metadata.")]
@@ -80,6 +70,13 @@ pub enum Error {
     BytesDiff { bytes_diff: u32 },
     #[error("Package {name} not found.")]
     PackageNotFound { name: String },
+    #[error("Failed parsing Wasm hash {hash}: {error}.")]
+    ParsingWasmHash {
+        hash: String,
+        error: <stellar_xdr::curr::Hash as FromStr>::Err,
+    },
+    #[error(transparent)]
+    Network(#[from] config::network::Error),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -361,40 +358,21 @@ impl NetworkRunnable for Cmd {
             CmdWasmSrc::Contract(wasm) => {
                 let config = config.unwrap_or(&wasm.config);
                 let network = config.get_network()?;
-                let client = Client::new(&network.rpc_url)?;
-                client
-                    .verify_network_passphrase(Some(&network.network_passphrase))
-                    .await?;
-
-                let contract_id = config
-                    .locator
-                    .resolve_contract_id(&wasm.contract_id, &network.network_passphrase)
-                    .map_err(|e| Error::CannotParseContractId {
-                        contract_id: wasm.contract_id.clone(),
-                        error: e,
-                    })?
-                    .0;
-
-                Ok(client.get_remote_wasm(&contract_id).await?)
+                Ok(wasm::fetch_from_contract(&wasm.contract_id, &network, &config.locator).await?)
             }
             CmdWasmSrc::WasmHash(wasm) => {
                 let config = config.unwrap_or(&wasm.config);
                 let network = config.get_network()?;
-                let client = Client::new(&network.rpc_url)?;
+                let client = network.rpc_client().map_err(Error::Network)?;
                 client
                     .verify_network_passphrase(Some(&network.network_passphrase))
                     .await?;
 
-                let wasm_hash = Hash(
-                    utils::contract_id_from_str(&wasm.wasm_hash)
-                        .map_err(|e| Error::CannotParseWasmHash {
-                            wasm_hash: wasm.wasm_hash.clone(),
-                            error: e,
-                        })?
-                        .0,
-                );
-
-                Ok(client.get_remote_wasm_from_hash(wasm_hash).await?)
+                let hash = Hash::from_str(&wasm.wasm_hash).map_err(|e| Error::ParsingWasmHash {
+                    hash: wasm.wasm_hash.clone(),
+                    error: e,
+                })?;
+                Ok(get_remote_wasm_from_hash(&client, &hash).await?)
             }
             _ => unreachable!(),
         }
