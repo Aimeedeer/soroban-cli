@@ -1,6 +1,5 @@
 use cargo_metadata::{Metadata, MetadataCommand, Package};
 use clap::Parser;
-use colored::*;
 use itertools::Itertools;
 use std::{
     borrow::Cow,
@@ -103,8 +102,6 @@ pub enum Error {
     CopyingWasmFile(io::Error),
     #[error("getting the current directory: {0}")]
     GettingCurrentDir(io::Error),
-    #[error("retreiving CARGO_HOME: {0}")]
-    CargoHome(io::Error),
     #[error("reading wasm file: {0}")]
     ReadingWasmFile(io::Error),
     #[error("writing wasm file: {0}")]
