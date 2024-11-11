@@ -32,6 +32,8 @@ pub enum Error {
     WritingWasmFile(io::Error),
     #[error("Copying wasm file: {0}")]
     CopyingWasmFile(io::Error),
+    #[error("Removing temporary backup wasm file: {0}")]
+    RemovingBackupWasmFile(io::Error),
     #[error("Failed fetching Git repository. Exited with status code: {code}.")]
     FetchingGitRepo { code: u16 },
     #[error("Failed fetching Git information. Exited with status code: {code}.")]
@@ -207,6 +209,7 @@ pub fn update_wasm_contractmeta_after_build(
 
     fs::write(&temp_file_path, wasm).map_err(Error::WritingWasmFile)?;
     fs::rename(&temp_file_path, &target_file_path).map_err(Error::CopyingWasmFile)?;
+    fs::remove_file(backup_file_path).map_err(Error::RemovingBackupWasmFile)?;
 
     let repro_meta = read_wasm_reprometa(&target_file_path)?;
     if let Some(ref rustc) = repro_meta.rustc {
