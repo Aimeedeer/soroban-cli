@@ -1,3 +1,5 @@
+use crate::repro_utils;
+use crate::{commands::global, print::Print};
 use cargo_metadata::{Metadata, MetadataCommand, Package};
 use clap::Parser;
 use itertools::Itertools;
@@ -12,8 +14,6 @@ use std::{
     process::{Command, ExitStatus, Stdio},
 };
 use stellar_xdr::curr::{Limits, ScMetaEntry, ScMetaV0, StringM, WriteXdr};
-use crate::{commands::global, print::Print};
-use crate::repro_utils;
 
 /// Build a contract from source
 ///
