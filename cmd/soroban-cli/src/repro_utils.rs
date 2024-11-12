@@ -202,7 +202,7 @@ pub fn update_wasm_contractmeta_after_build(
     let wasm = insert_metadata(&metadata, &wasm_buf)?;
 
     let backup_file_path = target_file_path.with_extension("backup.wasm");
-    fs::copy(&target_file_path, backup_file_path).map_err(Error::CopyingWasmFile)?;
+    fs::copy(&target_file_path, &backup_file_path).map_err(Error::CopyingWasmFile)?;
 
     let temp_file = format!("{}.{}.temp", target_file, rand::random::<u32>());
     let temp_file_path = file_path.join(temp_file);
